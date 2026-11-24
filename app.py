@@ -101,6 +101,15 @@ DISCOMFORT_REPORT_GUIDE_MSG = (
     "익명으로 운영진에게 전달됩니다."
 )
 
+COMMAND_LIST_MSG = (
+    "📌 사용 가능한 명령어 안내\n\n"
+    "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
+    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n"
+    "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
+    "• /불편신고 — 1:1 익명 신고·건의 방법 안내\n"
+    "• /명령어 — 사용 가능한 명령어 목록 보기"
+)
+
 
 def today_key() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d")
@@ -789,6 +798,10 @@ def handle_message(event):
 
     user_text = (getattr(event.message, "text", None) or "").strip()
     cmd = normalize_command(user_text)
+
+    if cmd == "/명령어":
+        reply_messages(event.reply_token, [COMMAND_LIST_MSG])
+        return
 
     if cmd == "/불편신고":
         reply_messages(event.reply_token, [DISCOMFORT_REPORT_GUIDE_MSG])
