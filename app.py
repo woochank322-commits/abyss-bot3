@@ -1,5 +1,4 @@
 from datetime import datetime
-import hashlib
 import json
 import logging
 import os
@@ -55,6 +54,12 @@ def parse_admin_target_ids() -> list[str]:
 # 건의·신고를 수신할 관리자 user_id(U...) 또는 운영진 전용방 group_id(C...) 목록
 ADMIN_TARGET_IDS: list[str] = parse_admin_target_ids()
 ADMIN_TARGET_SET: set[str] = set(ADMIN_TARGET_IDS)
+# 관리자 전용 명령어를 실행할 수 있는 user_id 목록 (쉼표 구분: U111,U222)
+ADMIN_USER_IDS: set[str] = {
+    uid.strip()
+    for uid in (os.getenv("ADMIN_USER_IDS") or "").split(",")
+    if uid.strip()
+}
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise ValueError("LINE_CHANNEL_ACCESS_TOKEN과 LINE_CHANNEL_SECRET 환경 변수를 설정해주세요.")
@@ -122,13 +127,22 @@ COMMAND_LIST_MSG = (
     "📌 사용 가능한 명령어 안내\n\n"
     "[일반 멤버 명령어]\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
-    "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
     "• /불편신고 — 1:1 신고·건의 방법 안내\n"
     "• /명령어 — 사용 가능한 명령어 목록 보기\n\n"
     "[관리자 전용 사용 가능 명령어]\n"
+    "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
     "• /전체랭킹 — 오늘 방 전체 마디 수 랭킹 확인\n"
     "• /활동부족 — 오늘 30마디 미만 인원 목록 확인"
 )
+
+
+def is_admin_user(user_id: str | None, chat_id: str = "") -> bool:
+    """관리자 권한 판별: ADMIN_USER_IDS 지정 시 해당 user_id만 허용"""
+    if ADMIN_USER_IDS:
+        return bool(user_id and user_id in ADMIN_USER_IDS)
+    if ADMIN_TARGET_SET:
+        return bool((user_id and user_id in ADMIN_TARGET_SET) or (chat_id and chat_id in ADMIN_TARGET_SET))
+    return False
 
 
 def today_key() -> str:
@@ -187,12 +201,6 @@ def extract_command_payload(text: str, cmd: str) -> str:
     if idx == -1:
         return ""
     return stripped[idx + len(cmd):].strip()
-
-
-def make_anon_code(user_id: str) -> str:
-    """참고용 4자리 식별 코드"""
-    raw = f"{CHANNEL_SECRET}:{user_id}".encode("utf-8")
-    return "#" + hashlib.sha256(raw).hexdigest()[:4].upper()
 
 
 def calculate_message_madit(text: str) -> int:
@@ -277,7 +285,7 @@ def get_display_name_by_ids(
     except Exception as e:
         logger.debug("[PROFILE] fallback for user_id=%s: %s", uid, e)
 
-    return uid[-6:] if uid != "unknown" else "익명"
+    return uid[-6:] if uid != "unknown" else "미확인"
 
 
 def get_display_name(event) -> str:
@@ -584,14 +592,14 @@ def format_inactive_members() -> str:
 
 
 def save_and_forward_report(
-    user_id: str,
+    cooldown_key: str,
     reporter_name: str,
     kind: str,
     content: str,
 ) -> tuple[bool, str]:
     """
     1:1 개인 채팅으로 접수된 건의·신고를 작성자 닉네임과 함께 저장하고
-    ADMIN_TARGET_IDS에 등록된 여러 관리자에게 푸시 전달
+    ADMIN_TARGET_IDS에 등록된 관리자에게 푸시 전달
     """
     if not ADMIN_TARGET_IDS:
         return (
@@ -599,9 +607,15 @@ def save_and_forward_report(
             "⚠️ 현재 운영진 수신처가 아직 연결되지 않아 접수할 수 없습니다. 잠시 후 다시 시도해 주세요.",
         )
 
+    resolved_reporter_name = (
+        reporter_name.strip()
+        if reporter_name and reporter_name.strip()
+        else (cooldown_key[-6:] if cooldown_key else "미확인")
+    )
+
     now_ts = time.monotonic()
     with state_lock:
-        prev_ts = last_reported_at.get(user_id, 0.0)
+        prev_ts = last_reported_at.get(cooldown_key, 0.0)
         elapsed = now_ts - prev_ts
         if prev_ts > 0 and elapsed < REPORT_COOLDOWN_SEC:
             remain_sec = int(REPORT_COOLDOWN_SEC - elapsed) + 1
@@ -611,7 +625,6 @@ def save_and_forward_report(
             )
 
         now_kst_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
-        anon_code = make_anon_code(user_id)
 
         latest = load_json_dict(REPORTS_STORE_PATH)
         reports_data.update(latest)
@@ -624,8 +637,7 @@ def save_and_forward_report(
         entry = {
             "no": report_no,
             "kind": kind,
-            "reporter_name": reporter_name,
-            "anon_code": anon_code,
+            "reporter_name": resolved_reporter_name,
             "content": content,
             "created_at": now_kst_str,
         }
@@ -633,14 +645,13 @@ def save_and_forward_report(
         if len(items) > 100:
             reports_data["items"] = items[-100:]
         save_json_dict(REPORTS_STORE_PATH, reports_data)
-        last_reported_at[user_id] = now_ts
+        last_reported_at[cooldown_key] = now_ts
 
     icon = "🚨" if kind == "신고" else "📩"
     admin_text = (
         f"{icon} [{kind} 접수 #{report_no}]\n"
         f"• 접수 시각: {now_kst_str}\n"
-        f"• 작성자: {reporter_name}\n"
-        f"• 코드: {anon_code}\n"
+        f"• 작성자: {resolved_reporter_name}\n"
         f"• 내용:\n{content}"
     )
 
@@ -667,7 +678,7 @@ def save_and_forward_report(
             "[REPORT] forwarded no=%d kind=%s reporter=%s delivered=%d/%d",
             report_no,
             kind,
-            reporter_name,
+            resolved_reporter_name,
             delivered_count,
             len(ADMIN_TARGET_IDS),
         )
@@ -705,7 +716,7 @@ def format_recent_reports(limit: int = 10) -> str:
             continue
         no = r.get("no", "?")
         kind = r.get("kind", "건의")
-        reporter_name = r.get("reporter_name") or "알 수 없음"
+        reporter_name = r.get("reporter_name") or "미확인"
         created_at = r.get("created_at", "")
         content = r.get("content", "")
         lines.append(
@@ -811,7 +822,7 @@ def handle_message(event):
 
     # 2) 운영진 전용 건의·신고 내역 조회 (본방에서는 완전 무응답)
     if cmd == "/건의목록":
-        if chat_id in ADMIN_TARGET_SET:
+        if chat_id in ADMIN_TARGET_SET and is_admin_user(user_id, chat_id):
             reply_messages(event.reply_token, [format_recent_reports()])
         return
 
@@ -834,7 +845,7 @@ def handle_message(event):
 
         reporter_name = get_display_name(event)
         _, result_msg = save_and_forward_report(
-            user_id=user_id,
+            cooldown_key=user_id,
             reporter_name=reporter_name,
             kind=kind,
             content=payload,
@@ -849,7 +860,7 @@ def handle_message(event):
     elif user_id:
         name = get_display_name(event)
     else:
-        name = "익명"
+        name = "미확인"
 
     if cmd in ("/환찌", "/환츄"):
         reply_messages(event.reply_token, [HWAN_MSG])
