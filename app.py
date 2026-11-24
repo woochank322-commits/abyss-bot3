@@ -36,8 +36,25 @@ logger = logging.getLogger("abyss_main_bot")
 
 CHANNEL_ACCESS_TOKEN = (os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or "").strip()
 CHANNEL_SECRET = (os.getenv("LINE_CHANNEL_SECRET") or "").strip()
-# 건의·신고를 수신할 방장 user_id(U...) 또는 운영진 전용방 group_id(C...)
-ADMIN_TARGET_ID = (os.getenv("ADMIN_TARGET_ID") or "").strip()
+
+
+def parse_admin_target_ids() -> list[str]:
+    """ADMIN_TARGET_IDS(쉼표 구분 다중 ID) 및 하위호환 ADMIN_TARGET_ID 파싱"""
+    raw_multi = os.getenv("ADMIN_TARGET_IDS") or ""
+    raw_single = os.getenv("ADMIN_TARGET_ID") or ""
+    candidates = [item.strip() for item in f"{raw_multi},{raw_single}".split(",") if item.strip()]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for tid in candidates:
+        if tid not in seen:
+            seen.add(tid)
+            ordered.append(tid)
+    return ordered
+
+
+# 건의·신고를 수신할 관리자 user_id(U...) 또는 운영진 전용방 group_id(C...) 목록
+ADMIN_TARGET_IDS: list[str] = parse_admin_target_ids()
+ADMIN_TARGET_SET: set[str] = set(ADMIN_TARGET_IDS)
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise ValueError("LINE_CHANNEL_ACCESS_TOKEN과 LINE_CHANNEL_SECRET 환경 변수를 설정해주세요.")
@@ -79,7 +96,6 @@ WELCOME_MSG = (
     "04.  자기소개서 게시글 댓글 작성\n"
     "05.  족보 게시글 댓글 작성\n\n"
     "🦭 모든 노트 작성 완료 후 “노트 작성 완료했습니다!” 라고 말씀해 주세요.\n\n"
-    "채팅으로 /명령어 를 입력해 사용 가능한 명령어를 확인하세요!\n\n"
     "다시 한번 𝓐𝓑𝓨𝓢𝓢에 오신 것을 환영합니다!"
 )
 
@@ -211,7 +227,7 @@ def register_chat_target(event) -> None:
     if not target_id:
         return
 
-    if ADMIN_TARGET_ID and target_id == ADMIN_TARGET_ID:
+    if target_id in ADMIN_TARGET_SET:
         return
 
     with state_lock:
@@ -229,7 +245,7 @@ def get_chat_targets() -> list[str]:
         targets_data.update(latest)
         return [
             tid for tid in targets_data.keys()
-            if not (ADMIN_TARGET_ID and tid == ADMIN_TARGET_ID)
+            if tid not in ADMIN_TARGET_SET
         ]
 
 
@@ -575,9 +591,9 @@ def save_and_forward_report(
 ) -> tuple[bool, str]:
     """
     1:1 개인 채팅으로 접수된 건의·신고를 작성자 닉네임과 함께 저장하고
-    ADMIN_TARGET_ID로 푸시 전달
+    ADMIN_TARGET_IDS에 등록된 여러 관리자에게 푸시 전달
     """
-    if not ADMIN_TARGET_ID:
+    if not ADMIN_TARGET_IDS:
         return (
             False,
             "⚠️ 현재 운영진 수신처가 아직 연결되지 않아 접수할 수 없습니다. 잠시 후 다시 시도해 주세요.",
@@ -628,23 +644,41 @@ def save_and_forward_report(
         f"• 내용:\n{content}"
     )
 
+    delivered_count = 0
     try:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
-            line_bot_api.push_message(
-                PushMessageRequest(
-                    to=ADMIN_TARGET_ID,
-                    messages=[TextMessage(text=admin_text)],
-                )
-            )
+            for target_id in ADMIN_TARGET_IDS:
+                try:
+                    line_bot_api.push_message(
+                        PushMessageRequest(
+                            to=target_id,
+                            messages=[TextMessage(text=admin_text)],
+                        )
+                    )
+                    delivered_count += 1
+                except Exception:
+                    logger.exception(
+                        "[REPORT] failed to push report no=%d to target=%s",
+                        report_no,
+                        target_id,
+                    )
         logger.info(
-            "[REPORT] forwarded no=%d kind=%s reporter=%s",
+            "[REPORT] forwarded no=%d kind=%s reporter=%s delivered=%d/%d",
             report_no,
             kind,
             reporter_name,
+            delivered_count,
+            len(ADMIN_TARGET_IDS),
         )
     except Exception:
-        logger.exception("[REPORT] failed to push report no=%d to ADMIN_TARGET_ID", report_no)
+        logger.exception("[REPORT] failed to initialize API client for report no=%d", report_no)
+        return (
+            False,
+            "⚠️ 운영진 알림 전송 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        )
+
+    if delivered_count == 0:
         return (
             False,
             "⚠️ 운영진 알림 전송 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
@@ -771,13 +805,13 @@ def handle_message(event):
 
     # 1) 초기 세팅용 ID 확인 명령어 (설정 완료 후 본방에서는 완전 숨김)
     if cmd == "/방아이디":
-        if is_private_chat or (not ADMIN_TARGET_ID) or (ADMIN_TARGET_ID and chat_id == ADMIN_TARGET_ID):
+        if is_private_chat or (not ADMIN_TARGET_SET) or (chat_id in ADMIN_TARGET_SET):
             reply_messages(event.reply_token, [f"🆔 현재 채팅 ID:\n{chat_id}"])
         return
 
     # 2) 운영진 전용 건의·신고 내역 조회 (본방에서는 완전 무응답)
     if cmd == "/건의목록":
-        if ADMIN_TARGET_ID and chat_id == ADMIN_TARGET_ID:
+        if chat_id in ADMIN_TARGET_SET:
             reply_messages(event.reply_token, [format_recent_reports()])
         return
 
