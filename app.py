@@ -36,7 +36,7 @@ logger = logging.getLogger("abyss_main_bot")
 
 CHANNEL_ACCESS_TOKEN = (os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or "").strip()
 CHANNEL_SECRET = (os.getenv("LINE_CHANNEL_SECRET") or "").strip()
-# 익명 건의·신고를 수신할 방장 user_id(U...) 또는 운영진 전용방 group_id(C...)
+# 건의·신고를 수신할 방장 user_id(U...) 또는 운영진 전용방 group_id(C...)
 ADMIN_TARGET_ID = (os.getenv("ADMIN_TARGET_ID") or "").strip()
 
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
@@ -59,7 +59,7 @@ MIN_ACTIVITY_MADIT = 30
 # 1개 메시지에서 인정되는 유효 단어(3글자 이상)의 최소 길이
 MIN_WORD_LEN = 3
 
-# 익명 건의·신고 도배 방지 쿨타임(초) 및 최소 내용 길이
+# 건의·신고 도배 방지 쿨타임(초) 및 최소 내용 길이
 REPORT_COOLDOWN_SEC = 300
 MIN_REPORT_LEN = 5
 
@@ -94,20 +94,23 @@ HWAN_MSG = (
 )
 
 DISCOMFORT_REPORT_GUIDE_MSG = (
-    "🚨 익명 불편신고 안내\n"
+    "🚨 불편신고 안내\n"
     "[오른쪽 상단 메뉴 -> 멤버 -> 봇 친구추가]\n\n"
     "친구 추가 후 봇과의 1:1 채팅에서\n"
     "/신고 [내용] 또는 /건의 [내용]으로 보내주시면\n"
-    "익명으로 운영진에게 전달됩니다."
+    "운영진에게 전달됩니다."
 )
 
 COMMAND_LIST_MSG = (
     "📌 사용 가능한 명령어 안내\n\n"
+    "[일반 멤버 명령어]\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
-    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n"
     "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
-    "• /불편신고 — 1:1 익명 신고·건의 방법 안내\n"
-    "• /명령어 — 사용 가능한 명령어 목록 보기"
+    "• /불편신고 — 1:1 신고·건의 방법 안내\n"
+    "• /명령어 — 사용 가능한 명령어 목록 보기\n\n"
+    "[관리자 전용 사용 가능 명령어]\n"
+    "• /전체랭킹 — 오늘 방 전체 마디 수 랭킹 확인\n"
+    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인"
 )
 
 
@@ -170,7 +173,7 @@ def extract_command_payload(text: str, cmd: str) -> str:
 
 
 def make_anon_code(user_id: str) -> str:
-    """운영진도 실제 유저를 역추적할 수 없는 4자리 단방향 식별 코드"""
+    """참고용 4자리 식별 코드"""
     raw = f"{CHANNEL_SECRET}:{user_id}".encode("utf-8")
     return "#" + hashlib.sha256(raw).hexdigest()[:4].upper()
 
@@ -197,8 +200,7 @@ def calculate_message_madit(text: str) -> int:
 
 def register_chat_target(event) -> None:
     """
-    자동 랭킹 전송 대상 등록 — 1:1 채팅 유저에게 전체 랭킹이 푸시되지 않도록
-    그룹(group_id) 또는 다인 채팅방(room_id)만 등록
+    채팅방 대상 등록 — 1:1 유저가 아닌 그룹(group_id) 또는 다인 채팅방(room_id)만 등록
     """
     source = getattr(event, "source", None)
     if not source:
@@ -564,9 +566,14 @@ def format_inactive_members() -> str:
     return "\n".join(lines)
 
 
-def save_and_forward_report(user_id: str, kind: str, content: str) -> tuple[bool, str]:
+def save_and_forward_report(
+    user_id: str,
+    reporter_name: str,
+    kind: str,
+    content: str,
+) -> tuple[bool, str]:
     """
-    1:1 개인 채팅으로 접수된 건의·신고를 익명 코드화해 저장하고
+    1:1 개인 채팅으로 접수된 건의·신고를 작성자 닉네임과 함께 저장하고
     ADMIN_TARGET_ID로 푸시 전달
     """
     if not ADMIN_TARGET_ID:
@@ -600,6 +607,7 @@ def save_and_forward_report(user_id: str, kind: str, content: str) -> tuple[bool
         entry = {
             "no": report_no,
             "kind": kind,
+            "reporter_name": reporter_name,
             "anon_code": anon_code,
             "content": content,
             "created_at": now_kst_str,
@@ -612,9 +620,10 @@ def save_and_forward_report(user_id: str, kind: str, content: str) -> tuple[bool
 
     icon = "🚨" if kind == "신고" else "📩"
     admin_text = (
-        f"{icon} [익명 {kind} #{report_no}]\n"
+        f"{icon} [{kind} 접수 #{report_no}]\n"
         f"• 접수 시각: {now_kst_str}\n"
-        f"• 식별 코드: {anon_code}\n"
+        f"• 작성자: {reporter_name}\n"
+        f"• 코드: {anon_code}\n"
         f"• 내용:\n{content}"
     )
 
@@ -627,7 +636,12 @@ def save_and_forward_report(user_id: str, kind: str, content: str) -> tuple[bool
                     messages=[TextMessage(text=admin_text)],
                 )
             )
-        logger.info("[REPORT] forwarded no=%d kind=%s code=%s", report_no, kind, anon_code)
+        logger.info(
+            "[REPORT] forwarded no=%d kind=%s reporter=%s",
+            report_no,
+            kind,
+            reporter_name,
+        )
     except Exception:
         logger.exception("[REPORT] failed to push report no=%d to ADMIN_TARGET_ID", report_no)
         return (
@@ -637,7 +651,7 @@ def save_and_forward_report(user_id: str, kind: str, content: str) -> tuple[bool
 
     return (
         True,
-        f"✅ 익명 {kind}가 정상 접수되었습니다. (접수번호 #{report_no})\n운영진에게 발신자 정보 없이 안전하게 전달되었습니다.",
+        f"✅ {kind}가 정상 접수되었습니다. (접수번호 #{report_no})\n운영진에게 전달되었습니다.",
     )
 
 
@@ -647,19 +661,21 @@ def format_recent_reports(limit: int = 10) -> str:
         reports_data.update(latest)
         items = reports_data.get("items", [])
         if not isinstance(items, list) or not items:
-            return "📋 접수된 익명 건의·신고 내역이 없습니다."
+            return "📋 접수된 건의·신고 내역이 없습니다."
         recent = list(reversed(items[-limit:]))
 
-    lines = [f"📋 최근 익명 건의·신고 내역 (최근 {len(recent)}건)"]
+    lines = [f"📋 최근 건의·신고 내역 (최근 {len(recent)}건)"]
     for r in recent:
         if not isinstance(r, dict):
             continue
         no = r.get("no", "?")
         kind = r.get("kind", "건의")
-        code = r.get("anon_code", "#----")
+        reporter_name = r.get("reporter_name") or "알 수 없음"
         created_at = r.get("created_at", "")
         content = r.get("content", "")
-        lines.append(f"\n[#{no} · {kind} · {code}] ({created_at})\n{content}")
+        lines.append(
+            f"\n[#{no} · {kind}] 작성자: {reporter_name} ({created_at})\n{content}"
+        )
 
     return "\n".join(lines)
 
@@ -682,68 +698,13 @@ def reply_messages(reply_token: str, texts: list[str]) -> None:
         raise
 
 
-def push_hourly_ranking() -> None:
-    targets = get_chat_targets()
-    if not targets:
-        logger.info("[HOURLY_RANKING] skipped: no registered targets yet")
-        return
-
-    ranking_text = format_all_ranking(header_prefix="⏰")
-    with ApiClient(configuration) as api_client:
-        line_bot_api = MessagingApi(api_client)
-        for target_id in targets:
-            try:
-                line_bot_api.push_message(
-                    PushMessageRequest(
-                        to=target_id,
-                        messages=[TextMessage(text=ranking_text)],
-                    )
-                )
-                logger.info("[HOURLY_RANKING] pushed to %s", target_id)
-            except Exception:
-                logger.exception("[HOURLY_RANKING] failed to push to %s", target_id)
-
-
-def hourly_ranking_scheduler_loop() -> None:
-    last_sent_slot = None
-    while True:
-        try:
-            now_kst = datetime.now(KST)
-            slot_key = now_kst.strftime("%Y-%m-%d %H:%M")
-            if now_kst.minute == 0 and slot_key != last_sent_slot:
-                last_sent_slot = slot_key
-                push_hourly_ranking()
-        except Exception:
-            logger.exception("[SCHEDULER] unexpected error in scheduler loop")
-        time.sleep(15)
-
-
-_scheduler_started = False
-_scheduler_lock = threading.Lock()
-
-
-def ensure_scheduler_started() -> None:
-    global _scheduler_started
-    with _scheduler_lock:
-        if not _scheduler_started:
-            t = threading.Thread(target=hourly_ranking_scheduler_loop, daemon=True)
-            t.start()
-            _scheduler_started = True
-            logger.info("[SCHEDULER] hourly ranking scheduler started")
-
-
-ensure_scheduler_started()
-
-
 @app.route("/", methods=["GET"])
 def health_check():
-    ensure_scheduler_started()
     return "ABYSS Main Room Bot is running.", 200
 
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    ensure_scheduler_started()
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
 
@@ -819,7 +780,7 @@ def handle_message(event):
             reply_messages(event.reply_token, [format_recent_reports()])
         return
 
-    # 3) 익명 건의·신고 접수 — 오직 1:1 개인 채팅에서만 동작, 본방에서는 완전 무응답
+    # 3) 1:1 건의·신고 접수 — 오직 1:1 개인 채팅에서만 동작, 본방에서는 완전 무응답
     if cmd in ("/건의", "/신고"):
         if not is_private_chat or not user_id:
             return
@@ -836,7 +797,13 @@ def handle_message(event):
             )
             return
 
-        _, result_msg = save_and_forward_report(user_id=user_id, kind=kind, content=payload)
+        reporter_name = get_display_name(event)
+        _, result_msg = save_and_forward_report(
+            user_id=user_id,
+            reporter_name=reporter_name,
+            kind=kind,
+            content=payload,
+        )
         reply_messages(event.reply_token, [result_msg])
         return
 
@@ -890,6 +857,5 @@ def handle_message(event):
 
 
 if __name__ == "__main__":
-    ensure_scheduler_started()
     port = int(os.getenv("PORT", 8000))
     app.run(host="0.0.0.0", port=port, debug=False)
