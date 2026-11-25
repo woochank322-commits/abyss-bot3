@@ -159,50 +159,56 @@ COMMAND_LIST_MSG = (
     "• /오야추 — 오늘의 추천 링크 확인\n"
     "• /상담 — 1:1 비밀 고민상담·신고·건의 방법 안내\n"
     "• /명령어 — 본방 명령어 목록 보기\n\n"
-    "[관리자 전용 사용 가능 명령어]\n"
+    "[관리자 명령어 (현재 권한 제한 없이 사용 가능)]\n"
     "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
     "• /전체랭킹 — 오늘 방 전체 마디 수 랭킹 확인\n"
-    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n\n"
+    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n"
+    "※ /노래삭제, /노래큐초기화, /링크목록, /링크삭제, /링크큐초기화는\n"
+    "   봇과의 1:1 채팅에서만 입력할 수 있습니다.\n\n"
     "💡 노래·링크 신청(/노래신청, /야동신청), 신고·건의,\n"
     "🔒 비밀 고민상담(/고민상담)은 봇과의 1:1 채팅에서 이용해 주세요."
 )
 
 PRIVATE_COMMAND_LIST_MSG = (
-    "📌 봇 1:1 개인 채팅 전용 명령어 안내\n\n"
-    "[비밀 상담 및 접수 명령어 (1:1 전용)]\n"
+    "📌 봇 1:1 개인 채팅 명령어 안내\n\n"
+    "[일반 멤버 명령어]\n"
     "• /고민상담 [내용] — 상담 담당 운영진·상담사에게만 비밀 전달\n"
     "  🔒 모든 상담 내용은 본방에 절대 공개되지 않으며,\n"
     "     지정된 담당 운영진·상담사 외에는 열람할 수 없습니다.\n"
     "• /신고 [내용] — 운영진에게 비공개 신고 접수\n"
-    "• /건의 [내용] — 운영진에게 건의사항 전달\n\n"
-    "[신청 명령어 (1:1 전용)]\n"
+    "• /건의 [내용] — 운영진에게 건의사항 전달\n"
     "• /노래신청 (가수)-(노래제목) — 통합 노래 리스트에 한 곡/여러 곡 등록\n"
     "  예) /노래신청 아이유-밤편지, 성시경-거리에서\n"
     "• /야동신청 (링크) — 오야추 링크 등록\n"
-    "  예) /야동신청 https://example.com\n\n"
-    "[조회 및 안내 명령어]\n"
+    "  예) /야동신청 https://example.com\n"
+    "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
     "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
     "• /노래목록 — 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
     "• /상담 — 비밀 고민상담·신고·건의 안내 다시 보기\n"
-    "• /명령어 — 1:1 채팅 명령어 목록 다시 보기"
+    "• /명령어 — 1:1 채팅 명령어 목록 다시 보기\n\n"
+    "[관리자 명령어 (1:1 채팅 전용 · 현재 권한 제한 없이 사용 가능)]\n"
+    "• /노래삭제 [번호 또는 쉼표로 여러 번호 / 가수-제목] — 통합 노래 삭제\n"
+    "  예) /노래삭제 1, 3, 5 또는 /노래삭제 아이유-밤편지\n"
+    "• /노래큐초기화 — 노래 추천 큐 초기화\n"
+    "• /링크목록 — 전체 추천 링크 목록 확인\n"
+    "• /링크삭제 [번호 또는 쉼표로 여러 번호 / URL] — 추천 링크 삭제\n"
+    "  예) /링크삭제 2, 4 또는 /링크삭제 example.com\n"
+    "• /링크큐초기화 — 링크 추천 큐 초기화\n"
+    "※ /전체랭킹, /활동부족은 본방과 1:1 채팅 모두에서 사용 가능합니다."
 )
 
 
 def is_admin_user(user_id: str | None, chat_id: str = "") -> bool:
-    """관리자 권한 판별: ADMIN_USER_IDS 지정 시 해당 user_id만 허용"""
-    if ADMIN_USER_IDS:
-        return bool(user_id and user_id in ADMIN_USER_IDS)
-    if ADMIN_TARGET_SET:
-        return bool((user_id and user_id in ADMIN_TARGET_SET) or (chat_id and chat_id in ADMIN_TARGET_SET))
-    return False
+    """관리자 권한 체크 해제 — 모든 사용자가 관리 명령어 실행 가능"""
+    return True
 
 
 def is_counseling_staff(user_id: str | None, chat_id: str = "") -> bool:
     """상담 담당 운영진·상담사 권한 판별"""
     if COUNSELING_TARGET_SET:
         return bool((user_id and user_id in COUNSELING_TARGET_SET) or (chat_id and chat_id in COUNSELING_TARGET_SET))
-    return is_admin_user(user_id, chat_id)
+    return bool(user_id or chat_id)
 
 
 def today_key() -> str:
@@ -289,6 +295,43 @@ def extract_command_payload(text: str, cmd: str) -> str:
     if idx == -1:
         return ""
     return stripped[idx + len(cmd):].strip()
+
+
+def parse_comma_numbers(cleaned: str) -> tuple[bool, list[int], list[str]]:
+    """
+    쉼표로 구분된 번호 목록 파싱:
+    - 모든 쉼표 분리 조각이 '#?숫자' 형식일 때만 다중 번호 모드로 인식
+    - 반환: (is_multi_number_mode, 중복 제거된 양의 정수 리스트, 잘못된 토큰 리스트)
+    """
+    if "," not in cleaned:
+        return False, [], []
+
+    parts = [p.strip() for p in cleaned.split(",")]
+    if any(not p for p in parts):
+        return False, [], []
+
+    parsed_nums: list[int] = []
+    invalid_tokens: list[str] = []
+    any_number = False
+
+    for p in parts:
+        m = re.fullmatch(r"#?(\d+)", p)
+        if m:
+            any_number = True
+            val = int(m.group(1))
+            if val >= 1:
+                if val not in parsed_nums:
+                    parsed_nums.append(val)
+            else:
+                invalid_tokens.append(p)
+        else:
+            invalid_tokens.append(p)
+
+    if any_number and not invalid_tokens:
+        return True, parsed_nums, []
+    if any_number and invalid_tokens:
+        return True, parsed_nums, invalid_tokens
+    return False, [], []
 
 
 def normalize_song_key(artist: str, title: str) -> str:
@@ -446,6 +489,28 @@ def sync_upcoming_song_ids(store: dict, items: list[dict], day: str | None = Non
     return stored_upcoming
 
 
+def _cleanup_deleted_pool_refs(store: dict, items: list[dict], deleted_ids: set[str]) -> None:
+    """항목 삭제 시 used_ids, upcoming_ids, daily_picks 내 삭제된 ID 참조 정리"""
+    if not deleted_ids:
+        return
+    valid_ids = {str(it.get("id")) for it in items if isinstance(it, dict) and it.get("id")}
+    store["used_ids"] = [
+        str(uid) for uid in (store.get("used_ids") or [])
+        if str(uid) in valid_ids and str(uid) not in deleted_ids
+    ]
+    store["upcoming_ids"] = [
+        str(uid) for uid in (store.get("upcoming_ids") or [])
+        if str(uid) in valid_ids and str(uid) not in deleted_ids
+    ]
+    daily_picks = store.get("daily_picks")
+    if isinstance(daily_picks, dict):
+        cleaned_picks = {
+            k: v for k, v in daily_picks.items()
+            if str(v) in valid_ids and str(v) not in deleted_ids
+        }
+        store["daily_picks"] = cleaned_picks
+
+
 def register_song(payload: str, requester_name: str) -> str:
     """통합 노래 리스트에 한 곡 또는 여러 곡 등록 처리 (1:1 채팅 전용)"""
     parsed_songs, invalid_chunks = parse_songs_payload(payload)
@@ -542,6 +607,164 @@ def register_song(payload: str, requester_name: str) -> str:
 
     lines.append(f"\n(현재 통합 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})")
     return "\n".join(lines)
+
+
+def delete_song_item(query_text: str) -> str:
+    """단일/복수 번호 또는 '가수-제목'/키워드로 통합 노래 리스트에서 곡 삭제 (1:1 채팅 전용)"""
+    cleaned = query_text.strip()
+    if not cleaned:
+        return (
+            "🗑️ 삭제할 곡 번호 또는 '가수-노래제목'을 입력해 주세요.\n"
+            "• 단일 번호 삭제: /노래삭제 3\n"
+            "• 여러 번호 삭제: /노래삭제 1, 3, 5\n"
+            "• 곡명 삭제: /노래삭제 아이유-밤편지"
+        )
+
+    is_multi_num, num_list, invalid_tokens = parse_comma_numbers(cleaned)
+
+    with state_lock:
+        latest = load_json_dict(SONGS_STORE_KEY, force_refresh=True)
+        songs_data.clear()
+        songs_data.update(latest)
+        items = ensure_pool_schema(songs_data, "songs")
+
+        if not items:
+            return "🎵 현재 통합 리스트에 등록된 노래가 없습니다."
+
+        if is_multi_num:
+            out_of_range = [n for n in num_list if not (1 <= n <= len(items))]
+            valid_nums = [n for n in num_list if 1 <= n <= len(items)]
+
+            removed_entries: list[tuple[int, str, str, str]] = []
+            for idx_1based in sorted(valid_nums, reverse=True):
+                removed = items.pop(idx_1based - 1)
+                removed_entries.append(
+                    (
+                        idx_1based,
+                        str(removed.get("id") or ""),
+                        str(removed.get("artist") or ""),
+                        str(removed.get("title") or ""),
+                    )
+                )
+            removed_entries.sort(key=lambda x: x[0])
+
+            deleted_ids = {rid for _, rid, _, _ in removed_entries if rid}
+            if deleted_ids:
+                _cleanup_deleted_pool_refs(songs_data, items, deleted_ids)
+                sync_upcoming_song_ids(songs_data, items)
+                save_json_dict(SONGS_STORE_KEY, songs_data)
+
+            remain_count = len(items)
+            lines: list[str] = []
+            if removed_entries:
+                lines.append(f"🗑️ 통합 리스트에서 노래 {len(removed_entries)}곡이 삭제되었습니다:")
+                for num, _, artist, title in removed_entries:
+                    lines.append(f"• {num}번: {artist} - {title}")
+            else:
+                lines.append("⚠️ 삭제된 노래가 없습니다.")
+
+            if out_of_range:
+                lines.append(
+                    f"\n⚠️ 범위 밖 번호 ({', '.join(f'{n}번' for n in out_of_range)}) — "
+                    f"삭제 전 기준 1번~{len(items) + len(removed_entries)}번 범위만 유효합니다."
+                )
+            if invalid_tokens:
+                lines.append(f"\n⚠️ 잘못된 번호 형식: {', '.join(invalid_tokens)}")
+
+            lines.append(f"\n(남은 통합 노래: {remain_count}곡)")
+            return "\n".join(lines)
+
+        target_index: int | None = None
+        num_match = re.fullmatch(r"#?(\d+)", cleaned)
+        if num_match:
+            idx_1based = int(num_match.group(1))
+            if 1 <= idx_1based <= len(items):
+                target_index = idx_1based - 1
+            else:
+                return f"⚠️ 잘못된 번호입니다. 현재 1번부터 {len(items)}번까지 있습니다."
+        else:
+            parsed_pair = parse_single_song_chunk(cleaned)
+            if parsed_pair:
+                target_key = normalize_song_key(parsed_pair[0], parsed_pair[1])
+                for i, it in enumerate(items):
+                    if not isinstance(it, dict):
+                        continue
+                    ek = it.get("dedup_key") or normalize_song_key(
+                        str(it.get("artist", "")), str(it.get("title", ""))
+                    )
+                    if ek == target_key:
+                        target_index = i
+                        break
+
+            if target_index is None:
+                norm_query = re.sub(r"\s+", "", cleaned).lower()
+                matches: list[int] = []
+                for i, it in enumerate(items):
+                    if not isinstance(it, dict):
+                        continue
+                    combined = re.sub(
+                        r"\s+", "", f"{it.get('artist', '')}-{it.get('title', '')}"
+                    ).lower()
+                    if norm_query and norm_query in combined:
+                        matches.append(i)
+                if len(matches) == 1:
+                    target_index = matches[0]
+                elif len(matches) > 1:
+                    sample_lines = [
+                        f"• {m + 1}. {items[m].get('artist', '')} - {items[m].get('title', '')}"
+                        for m in matches[:5]
+                    ]
+                    return (
+                        f"⚠️ '{cleaned}'와 일치하는 곡이 {len(matches)}건 있습니다. 번호로 지정해 주세요:\n"
+                        + "\n".join(sample_lines)
+                    )
+
+        if target_index is None:
+            return f"⚠️ '{cleaned}'에 해당하는 노래를 찾지 못했습니다. /노래목록으로 확인해 주세요."
+
+        removed = items.pop(target_index)
+        removed_id = str(removed.get("id") or "")
+        removed_artist = str(removed.get("artist") or "")
+        removed_title = str(removed.get("title") or "")
+
+        _cleanup_deleted_pool_refs(songs_data, items, {removed_id} if removed_id else set())
+        sync_upcoming_song_ids(songs_data, items)
+        save_json_dict(SONGS_STORE_KEY, songs_data)
+        remain_count = len(items)
+
+    return (
+        f"🗑️ 통합 리스트에서 노래가 삭제되었습니다: {removed_artist} - {removed_title}\n"
+        f"(남은 통합 노래: {remain_count}곡)"
+    )
+
+
+def reset_song_queue() -> str:
+    """노래 추천 이력(used_ids), 남은 후보(upcoming_ids), 오늘 추천 기록 초기화 (1:1 채팅 전용)"""
+    day = today_key()
+    with state_lock:
+        latest = load_json_dict(SONGS_STORE_KEY, force_refresh=True)
+        songs_data.clear()
+        songs_data.update(latest)
+        items = ensure_pool_schema(songs_data, "songs")
+        total_count = len(items)
+
+        songs_data["used_ids"] = []
+        songs_data["upcoming_ids"] = []
+        daily_picks = songs_data.get("daily_picks")
+        if isinstance(daily_picks, dict):
+            daily_picks.pop(day, None)
+        else:
+            songs_data["daily_picks"] = {}
+
+        if total_count > 0:
+            sync_upcoming_song_ids(songs_data, items, day=day)
+        save_json_dict(SONGS_STORE_KEY, songs_data)
+
+    return (
+        f"🔄 노래 추천 큐가 초기화되었습니다.\n"
+        f"• 등록 유지 곡: {total_count}곡\n"
+        f"• 추천 이력 및 오늘({day}) 추천 기록이 초기화되어 새 순환으로 진행됩니다."
+    )
 
 
 def format_song_recommendation_msg(day: str, artist: str, title: str) -> str:
@@ -699,7 +922,7 @@ def register_adult_link(payload: str, requester_name: str) -> str:
     link_key = normalize_link_key(link)
 
     with state_lock:
-        latest = load_json_dict(ADULT_LINKS_STORE_KEY)
+        latest = load_json_dict(ADULT_LINKS_STORE_KEY, force_refresh=True)
         adult_links_data.clear()
         adult_links_data.update(latest)
         items = ensure_pool_schema(adult_links_data, "links")
@@ -730,6 +953,175 @@ def register_adult_link(payload: str, requester_name: str) -> str:
     )
 
 
+def format_adult_link_list_msg() -> str:
+    """등록된 전체 추천 링크 목록 조회 (1:1 채팅 전용)"""
+    day = today_key()
+    with state_lock:
+        latest = load_json_dict(ADULT_LINKS_STORE_KEY, force_refresh=True)
+        adult_links_data.clear()
+        adult_links_data.update(latest)
+        items = ensure_pool_schema(adult_links_data, "links")
+
+    if not items:
+        return "🔞 현재 등록된 추천 링크가 없습니다."
+
+    used_set = {str(uid) for uid in (adult_links_data.get("used_ids") or [])}
+    today_pick_id = str((adult_links_data.get("daily_picks") or {}).get(day) or "")
+
+    lines = [f"🔗 전체 추천 링크 목록 (총 {len(items)}개)"]
+    for idx, it in enumerate(items, start=1):
+        if not isinstance(it, dict):
+            continue
+        lid = str(it.get("id") or "")
+        url = str(it.get("url") or "")
+        if lid == today_pick_id:
+            badge = " [오늘 추천]"
+        elif lid in used_set:
+            badge = " [추천 완료]"
+        else:
+            badge = " [추천 대기]"
+        lines.append(f"{idx}. {url}{badge}")
+
+    return "\n".join(lines)
+
+
+def delete_adult_link_item(query_text: str) -> str:
+    """단일/복수 번호 또는 URL 일부로 추천 링크 삭제 (1:1 채팅 전용)"""
+    cleaned = query_text.strip()
+    if not cleaned:
+        return (
+            "🗑️ 삭제할 링크 번호 또는 URL 일부를 입력해 주세요.\n"
+            "• 단일 번호 삭제: /링크삭제 2\n"
+            "• 여러 번호 삭제: /링크삭제 2, 4, 6\n"
+            "• URL 삭제: /링크삭제 example.com"
+        )
+
+    is_multi_num, num_list, invalid_tokens = parse_comma_numbers(cleaned)
+
+    with state_lock:
+        latest = load_json_dict(ADULT_LINKS_STORE_KEY, force_refresh=True)
+        adult_links_data.clear()
+        adult_links_data.update(latest)
+        items = ensure_pool_schema(adult_links_data, "links")
+
+        if not items:
+            return "🔞 현재 등록된 추천 링크가 없습니다."
+
+        if is_multi_num:
+            out_of_range = [n for n in num_list if not (1 <= n <= len(items))]
+            valid_nums = [n for n in num_list if 1 <= n <= len(items)]
+
+            removed_entries: list[tuple[int, str, str]] = []
+            for idx_1based in sorted(valid_nums, reverse=True):
+                removed = items.pop(idx_1based - 1)
+                removed_entries.append(
+                    (
+                        idx_1based,
+                        str(removed.get("id") or ""),
+                        str(removed.get("url") or ""),
+                    )
+                )
+            removed_entries.sort(key=lambda x: x[0])
+
+            deleted_ids = {rid for _, rid, _ in removed_entries if rid}
+            if deleted_ids:
+                _cleanup_deleted_pool_refs(adult_links_data, items, deleted_ids)
+                save_json_dict(ADULT_LINKS_STORE_KEY, adult_links_data)
+
+            remain_count = len(items)
+            lines: list[str] = []
+            if removed_entries:
+                lines.append(f"🗑️ 추천 링크 {len(removed_entries)}개가 삭제되었습니다:")
+                for num, _, url in removed_entries:
+                    lines.append(f"• {num}번: {url}")
+            else:
+                lines.append("⚠️ 삭제된 링크가 없습니다.")
+
+            if out_of_range:
+                lines.append(
+                    f"\n⚠️ 범위 밖 번호 ({', '.join(f'{n}번' for n in out_of_range)}) — "
+                    f"삭제 전 기준 1번~{len(items) + len(removed_entries)}번 범위만 유효합니다."
+                )
+            if invalid_tokens:
+                lines.append(f"\n⚠️ 잘못된 번호 형식: {', '.join(invalid_tokens)}")
+
+            lines.append(f"\n(남은 등록 링크: {remain_count}개)")
+            return "\n".join(lines)
+
+        target_index: int | None = None
+        num_match = re.fullmatch(r"#?(\d+)", cleaned)
+        if num_match:
+            idx_1based = int(num_match.group(1))
+            if 1 <= idx_1based <= len(items):
+                target_index = idx_1based - 1
+            else:
+                return f"⚠️ 잘못된 번호입니다. 현재 1번부터 {len(items)}번까지 있습니다."
+        else:
+            norm_key = normalize_link_key(cleaned)
+            matches: list[int] = []
+            for i, it in enumerate(items):
+                if not isinstance(it, dict):
+                    continue
+                url_str = str(it.get("url") or "")
+                ek = str(it.get("dedup_key") or normalize_link_key(url_str))
+                if (norm_key and norm_key in ek) or (cleaned.lower() in url_str.lower()):
+                    matches.append(i)
+            if len(matches) == 1:
+                target_index = matches[0]
+            elif len(matches) > 1:
+                sample_lines = [
+                    f"• {m + 1}. {items[m].get('url', '')}"
+                    for m in matches[:5]
+                ]
+                return (
+                    f"⚠️ '{cleaned}'와 일치하는 링크가 {len(matches)}건 있습니다. 번호로 지정해 주세요:\n"
+                    + "\n".join(sample_lines)
+                )
+
+        if target_index is None:
+            return f"⚠️ '{cleaned}'에 해당하는 링크를 찾지 못했습니다. /링크목록으로 확인해 주세요."
+
+        removed = items.pop(target_index)
+        removed_id = str(removed.get("id") or "")
+        removed_url = str(removed.get("url") or "")
+
+        _cleanup_deleted_pool_refs(adult_links_data, items, {removed_id} if removed_id else set())
+        save_json_dict(ADULT_LINKS_STORE_KEY, adult_links_data)
+        remain_count = len(items)
+
+    return (
+        f"🗑️ 추천 링크가 삭제되었습니다: {removed_url}\n"
+        f"(남은 등록 링크: {remain_count}개)"
+    )
+
+
+def reset_adult_link_queue() -> str:
+    """링크 추천 이력(used_ids) 및 오늘 추천 기록 초기화 (1:1 채팅 전용)"""
+    day = today_key()
+    with state_lock:
+        latest = load_json_dict(ADULT_LINKS_STORE_KEY, force_refresh=True)
+        adult_links_data.clear()
+        adult_links_data.update(latest)
+        items = ensure_pool_schema(adult_links_data, "links")
+        total_count = len(items)
+
+        adult_links_data["used_ids"] = []
+        adult_links_data["upcoming_ids"] = []
+        daily_picks = adult_links_data.get("daily_picks")
+        if isinstance(daily_picks, dict):
+            daily_picks.pop(day, None)
+        else:
+            adult_links_data["daily_picks"] = {}
+
+        save_json_dict(ADULT_LINKS_STORE_KEY, adult_links_data)
+
+    return (
+        f"🔄 링크 추천 큐가 초기화되었습니다.\n"
+        f"• 등록 유지 링크: {total_count}개\n"
+        f"• 추천 이력 및 오늘({day}) 추천 기록이 초기화되어 새 순환으로 진행됩니다."
+    )
+
+
 def format_adult_link_recommendation_msg(day: str, url: str) -> str:
     return (
         f"🔞 [{day}] 오늘의 추천 [오야추]\n"
@@ -751,7 +1143,7 @@ def get_today_adult_link_recommendation() -> str:
     prev_day = yesterday_key()
 
     with state_lock:
-        latest = load_json_dict(ADULT_LINKS_STORE_KEY)
+        latest = load_json_dict(ADULT_LINKS_STORE_KEY, force_refresh=True)
         adult_links_data.clear()
         adult_links_data.update(latest)
         items = ensure_pool_schema(adult_links_data, "links")
@@ -1652,7 +2044,40 @@ def handle_message(event):
         reply_messages(event.reply_token, [register_adult_link(payload, requester_name=requester_name)])
         return
 
-    # 이하 일반 본방 기능 (1:1 채팅 유저는 본방 멤버 목록에 섞지 않음)
+    # 5) 1:1 채팅 전용 관리 명령어 (/전체랭킹, /활동부족 제외한 나머지 관리 명령어)
+    if cmd == "/노래삭제":
+        if not is_private_chat or not user_id:
+            return
+        payload = extract_command_payload(user_text, cmd)
+        reply_messages(event.reply_token, [delete_song_item(payload)])
+        return
+
+    if cmd == "/노래큐초기화":
+        if not is_private_chat or not user_id:
+            return
+        reply_messages(event.reply_token, [reset_song_queue()])
+        return
+
+    if cmd == "/링크목록":
+        if not is_private_chat or not user_id:
+            return
+        reply_messages(event.reply_token, [format_adult_link_list_msg()])
+        return
+
+    if cmd == "/링크삭제":
+        if not is_private_chat or not user_id:
+            return
+        payload = extract_command_payload(user_text, cmd)
+        reply_messages(event.reply_token, [delete_adult_link_item(payload)])
+        return
+
+    if cmd == "/링크큐초기화":
+        if not is_private_chat or not user_id:
+            return
+        reply_messages(event.reply_token, [reset_adult_link_queue()])
+        return
+
+    # 이하 일반 본방 기능 및 본방/1:1 공용 랭킹 관리 (/전체랭킹, /활동부족)
     if is_group_or_room and user_id:
         name = get_display_name(event)
         upsert_member(user_id, name)
@@ -1684,13 +2109,11 @@ def handle_message(event):
         return
 
     if cmd == "/전체랭킹":
-        if is_admin_user(user_id, chat_id):
-            reply_messages(event.reply_token, [format_all_ranking()])
+        reply_messages(event.reply_token, [format_all_ranking()])
         return
 
     if cmd == "/활동부족":
-        if is_admin_user(user_id, chat_id):
-            reply_messages(event.reply_token, [format_inactive_members()])
+        reply_messages(event.reply_token, [format_inactive_members()])
         return
 
     if is_group_or_room and user_id:
