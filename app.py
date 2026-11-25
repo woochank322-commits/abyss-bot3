@@ -349,6 +349,16 @@ def register_song(payload: str, requester_name: str) -> str:
     )
 
 
+def format_song_recommendation_msg(day: str, artist: str, title: str) -> str:
+    return (
+        f"🎧 [{day}] 오늘의 노래 추천 [오노추]\n"
+        f"• 가수: {artist}\n"
+        f"• 노래: {title}\n\n"
+        f"※ 노래 신청은 봇과의 1:1 채팅에서\n"
+        f"/노래신청 (가수)-(노래제목)으로 해주세요."
+    )
+
+
 def get_today_song_recommendation() -> str:
     """
     오늘의 노래 추천(오노추):
@@ -371,8 +381,9 @@ def get_today_song_recommendation() -> str:
             return (
                 f"🎵 오노추는 노래가 {MIN_RECOMMEND_POOL_SIZE}곡 이상 모여야 시작됩니다.\n"
                 f"현재 등록된 노래: {total_count}/{MIN_RECOMMEND_POOL_SIZE}곡 "
-                f"({MIN_RECOMMEND_POOL_SIZE - total_count}곡 더 필요해요!)\n"
-                f"※ 봇 1:1 채팅에서 /노래신청 (가수)-(노래제목)으로 신청해 주세요."
+                f"({MIN_RECOMMEND_POOL_SIZE - total_count}곡 더 필요해요!)\n\n"
+                f"※ 노래 신청은 봇과의 1:1 채팅에서\n"
+                f"/노래신청 (가수)-(노래제목)으로 해주세요."
             )
 
         daily_picks: dict = songs_data["daily_picks"]
@@ -383,10 +394,10 @@ def get_today_song_recommendation() -> str:
 
         if today_pick_id and str(today_pick_id) in item_map:
             picked = item_map[str(today_pick_id)]
-            return (
-                f"🎧 [{day}] 오늘의 노래 추천 [오노추]\n"
-                f"• 가수: {picked.get('artist', '')}\n"
-                f"• 노래: {picked.get('title', '')}"
+            return format_song_recommendation_msg(
+                day=day,
+                artist=str(picked.get("artist", "")),
+                title=str(picked.get("title", "")),
             )
 
         used_ids: list[str] = [
@@ -413,10 +424,10 @@ def get_today_song_recommendation() -> str:
         save_json_dict(SONGS_STORE_PATH, songs_data)
 
         picked = item_map[chosen_id]
-        return (
-            f"🎧 [{day}] 오늘의 노래 추천 [오노추]\n"
-            f"• 가수: {picked.get('artist', '')}\n"
-            f"• 노래: {picked.get('title', '')}"
+        return format_song_recommendation_msg(
+            day=day,
+            artist=str(picked.get("artist", "")),
+            title=str(picked.get("title", "")),
         )
 
 
@@ -468,6 +479,15 @@ def register_adult_link(payload: str, requester_name: str) -> str:
     )
 
 
+def format_adult_link_recommendation_msg(day: str, url: str) -> str:
+    return (
+        f"🔞 [{day}] 오늘의 추천 [오야추]\n"
+        f"{url}\n\n"
+        f"※ 링크 신청은 봇과의 1:1 채팅에서\n"
+        f"/야동신청 (링크)로 해주세요."
+    )
+
+
 def get_today_adult_link_recommendation() -> str:
     """
     오늘의 야동 추천(오야추):
@@ -490,8 +510,9 @@ def get_today_adult_link_recommendation() -> str:
             return (
                 f"🔞 오야추는 링크가 {MIN_RECOMMEND_POOL_SIZE}개 이상 모여야 시작됩니다.\n"
                 f"현재 등록된 링크: {total_count}/{MIN_RECOMMEND_POOL_SIZE}개 "
-                f"({MIN_RECOMMEND_POOL_SIZE - total_count}개 더 필요해요!)\n"
-                f"※ 봇 1:1 채팅에서 /야동신청 (링크)로 신청해 주세요."
+                f"({MIN_RECOMMEND_POOL_SIZE - total_count}개 더 필요해요!)\n\n"
+                f"※ 링크 신청은 봇과의 1:1 채팅에서\n"
+                f"/야동신청 (링크)로 해주세요."
             )
 
         daily_picks: dict = adult_links_data["daily_picks"]
@@ -502,9 +523,9 @@ def get_today_adult_link_recommendation() -> str:
 
         if today_pick_id and str(today_pick_id) in item_map:
             picked = item_map[str(today_pick_id)]
-            return (
-                f"🔞 [{day}] 오늘의 추천 [오야추]\n"
-                f"{picked.get('url', '')}"
+            return format_adult_link_recommendation_msg(
+                day=day,
+                url=str(picked.get("url", "")),
             )
 
         used_ids: list[str] = [
@@ -531,9 +552,9 @@ def get_today_adult_link_recommendation() -> str:
         save_json_dict(ADULT_LINKS_STORE_PATH, adult_links_data)
 
         picked = item_map[chosen_id]
-        return (
-            f"🔞 [{day}] 오늘의 추천 [오야추]\n"
-            f"{picked.get('url', '')}"
+        return format_adult_link_recommendation_msg(
+            day=day,
+            url=str(picked.get("url", "")),
         )
 
 
