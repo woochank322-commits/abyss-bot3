@@ -4,13 +4,13 @@ import logging
 import os
 import random
 import re
-import tempfile
 import threading
 import time
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import Flask, request, abort
+from upstash_redis import Redis
 
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
@@ -36,6 +36,8 @@ logger = logging.getLogger("abyss_main_bot")
 
 CHANNEL_ACCESS_TOKEN = (os.getenv("LINE_CHANNEL_ACCESS_TOKEN") or "").strip()
 CHANNEL_SECRET = (os.getenv("LINE_CHANNEL_SECRET") or "").strip()
+UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 
 
 def parse_admin_target_ids() -> list[str]:
@@ -65,17 +67,24 @@ ADMIN_USER_IDS: set[str] = {
 if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
     raise ValueError("LINE_CHANNEL_ACCESS_TOKEN과 LINE_CHANNEL_SECRET 환경 변수를 설정해주세요.")
 
+if not UPSTASH_REDIS_REST_URL or not UPSTASH_REDIS_REST_TOKEN:
+    raise ValueError("UPSTASH_REDIS_REST_URL과 UPSTASH_REDIS_REST_TOKEN 환경 변수를 설정해주세요.")
+
 app = Flask(__name__)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
+redis_client = Redis(url=UPSTASH_REDIS_REST_URL, token=UPSTASH_REDIS_REST_TOKEN)
 
 KST = ZoneInfo("Asia/Seoul")
-RANKING_STORE_PATH = "/tmp/abyss_rankings.json"
-TARGETS_STORE_PATH = "/tmp/abyss_targets.json"
-MEMBERS_STORE_PATH = "/tmp/abyss_members.json"
-REPORTS_STORE_PATH = "/tmp/abyss_reports.json"
-SONGS_STORE_PATH = "/tmp/abyss_songs.json"
-ADULT_LINKS_STORE_PATH = "/tmp/abyss_adult_links.json"
+RANKING_STORE_KEY = "abyss:rankings"
+TARGETS_STORE_KEY = "abyss:targets"
+MEMBERS_STORE_KEY = "abyss:members"
+REPORTS_STORE_KEY = "abyss:reports"
+SONGS_STORE_KEY = "abyss:songs"
+ADULT_LINKS_STORE_KEY = "abyss:adult_links"
+
+# Upstash 무료 티어 명령어 절약용 메모리 캐시 재조회 주기(초)
+REDIS_REFRESH_INTERVAL_SEC = 15.0
 
 # 같은 유저의 연타 도배 방지 최소 간격(초). 0으로 두면 모든 유효 메시지 카운트
 MIN_SPEECH_INTERVAL_SEC = 2.0
@@ -88,12 +97,15 @@ MIN_WORD_LEN = 3
 REPORT_COOLDOWN_SEC = 300
 MIN_REPORT_LEN = 5
 
-# 오노추 / 오야추 시작 최소 등록 개수
-MIN_RECOMMEND_POOL_SIZE = 30
+# 오노추 시작 최소 등록 개수(5개) / 오야추 시작 최소 등록 개수(1개 이상)
+MIN_SONG_RECOMMEND_POOL_SIZE = 5
+MIN_ADULT_RECOMMEND_POOL_SIZE = 1
 
 state_lock = threading.Lock()
 last_counted_at: dict[str, float] = {}
 last_reported_at: dict[str, float] = {}
+store_cache: dict[str, dict] = {}
+store_loaded_at: dict[str, float] = {}
 
 WELCOME_MSG = (
     "🌊 ━━━ 🐬 𝓐𝓑𝓨𝓢𝓢 🐬 ━━━ 🌊\n"
@@ -134,6 +146,7 @@ COMMAND_LIST_MSG = (
     "[일반 멤버 명령어]\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
     "• /오노추 — 오늘의 노래 추천 확인\n"
+    "• /노래목록 — 전체 노래 및 다음 랜덤 추천 후보 확인\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
     "• /불편신고 — 1:1 신고·건의 방법 안내\n"
     "• /명령어 — 본방 명령어 목록 보기\n\n"
@@ -156,6 +169,7 @@ PRIVATE_COMMAND_LIST_MSG = (
     "• /건의 [내용] — 운영진에게 건의사항 전달\n\n"
     "[조회 및 안내 명령어]\n"
     "• /오노추 — 오늘의 노래 추천 확인\n"
+    "• /노래목록 — 전체 노래 및 다음 랜덤 추천 후보 확인\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
     "• /명령어 — 1:1 채팅 명령어 목록 다시 보기"
 )
@@ -178,45 +192,66 @@ def yesterday_key() -> str:
     return (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-def load_json_dict(path: str) -> dict:
-    if not os.path.exists(path):
+def _parse_redis_json(raw_val) -> dict:
+    if raw_val is None:
         return {}
+    if isinstance(raw_val, dict):
+        return raw_val
+    if isinstance(raw_val, (bytes, bytearray)):
+        raw_val = raw_val.decode("utf-8", errors="ignore")
+    if isinstance(raw_val, str):
+        if not raw_val.strip():
+            return {}
+        parsed = json.loads(raw_val)
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def load_json_dict(key: str, force_refresh: bool = False) -> dict:
+    """Upstash Redis에서 JSON 딕셔너리 조회(단기 캐시 적용)"""
+    now_ts = time.monotonic()
+    cached = store_cache.get(key)
+    last_ts = store_loaded_at.get(key, 0.0)
+    if (
+        not force_refresh
+        and cached is not None
+        and (now_ts - last_ts) < REDIS_REFRESH_INTERVAL_SEC
+    ):
+        return cached
+
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
+        raw_val = redis_client.get(key)
+        data = _parse_redis_json(raw_val)
+        store_cache[key] = data
+        store_loaded_at[key] = now_ts
+        return data
     except Exception as e:
-        logger.warning("[STORE] failed to load %s: %s", path, e)
-        return {}
+        logger.warning("[REDIS] failed to load key=%s: %s", key, e)
+        if cached is not None:
+            return cached
+        fallback: dict = {}
+        store_cache.setdefault(key, fallback)
+        return fallback
 
 
-def save_json_dict(path: str, data: dict) -> None:
-    """임시 파일 기록 후 os.replace()로 원자적 저장"""
-    directory = os.path.dirname(path) or "/tmp"
-    os.makedirs(directory, exist_ok=True)
-    tmp_path = None
+def save_json_dict(key: str, data: dict) -> None:
+    """Upstash Redis에 JSON 문자열로 저장 및 메모리 캐시 동기화"""
+    safe_dict = data if isinstance(data, dict) else {}
+    store_cache[key] = safe_dict
+    store_loaded_at[key] = time.monotonic()
     try:
-        fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=directory)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
+        payload = json.dumps(safe_dict, ensure_ascii=False)
+        redis_client.set(key, payload)
     except Exception as e:
-        logger.warning("[STORE] failed to save %s: %s", path, e)
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        logger.warning("[REDIS] failed to save key=%s: %s", key, e)
 
 
-ranking_data = load_json_dict(RANKING_STORE_PATH)
-targets_data = load_json_dict(TARGETS_STORE_PATH)
-members_data = load_json_dict(MEMBERS_STORE_PATH)
-reports_data = load_json_dict(REPORTS_STORE_PATH)
-songs_data = load_json_dict(SONGS_STORE_PATH)
-adult_links_data = load_json_dict(ADULT_LINKS_STORE_PATH)
+ranking_data = load_json_dict(RANKING_STORE_KEY, force_refresh=True)
+targets_data = load_json_dict(TARGETS_STORE_KEY, force_refresh=True)
+members_data = load_json_dict(MEMBERS_STORE_KEY, force_refresh=True)
+reports_data = load_json_dict(REPORTS_STORE_KEY, force_refresh=True)
+songs_data = load_json_dict(SONGS_STORE_KEY, force_refresh=True)
+adult_links_data = load_json_dict(ADULT_LINKS_STORE_KEY, force_refresh=True)
 
 
 def normalize_command(text: str) -> str:
@@ -294,11 +329,62 @@ def ensure_pool_schema(store: dict, items_key: str) -> list[dict]:
     daily_picks = store.get("daily_picks")
     if not isinstance(daily_picks, dict):
         store["daily_picks"] = {}
+    upcoming_ids = store.get("upcoming_ids")
+    if not isinstance(upcoming_ids, list):
+        store["upcoming_ids"] = []
     return items
 
 
+def sync_upcoming_song_ids(store: dict, items: list[dict], day: str | None = None, prev_day: str | None = None) -> list[str]:
+    """
+    앞으로 추천될 일이 남은 노래 ID 목록('upcoming_ids')을 별도 리스트로 동기화:
+    - 이미 추천 완료된 used_ids 제외
+    - 오늘/어제 추천된 곡 제외
+    - 전체 곡을 한 바퀴 다 돌았을 때는 어제 추천 곡만 제외하고 남은 후보를 다시 구성
+    """
+    current_day = day or today_key()
+    yesterday = prev_day or yesterday_key()
+
+    item_map = {
+        str(it.get("id")): it for it in items if isinstance(it, dict) and it.get("id")
+    }
+    all_ids = [str(it.get("id")) for it in items if isinstance(it, dict) and it.get("id")]
+
+    used_ids: list[str] = []
+    for uid in store.get("used_ids", []):
+        sid = str(uid)
+        if sid in item_map and sid not in used_ids:
+            used_ids.append(sid)
+    store["used_ids"] = used_ids
+
+    daily_picks: dict = store.get("daily_picks") if isinstance(store.get("daily_picks"), dict) else {}
+    today_pick_id = str(daily_picks.get(current_day) or "")
+    yesterday_pick_id = str(daily_picks.get(yesterday) or "")
+
+    stored_upcoming: list[str] = []
+    for uid in store.get("upcoming_ids", []):
+        sid = str(uid)
+        if sid in item_map and sid not in used_ids and sid != today_pick_id and sid not in stored_upcoming:
+            stored_upcoming.append(sid)
+
+    for sid in all_ids:
+        if sid not in used_ids and sid != today_pick_id and sid not in stored_upcoming:
+            stored_upcoming.append(sid)
+
+    if not stored_upcoming and all_ids:
+        used_ids = []
+        store["used_ids"] = []
+        rebuilt = [sid for sid in all_ids if sid != yesterday_pick_id and sid != today_pick_id]
+        if not rebuilt:
+            rebuilt = [sid for sid in all_ids if sid != today_pick_id] or list(all_ids)
+        stored_upcoming = rebuilt
+
+    store["upcoming_ids"] = stored_upcoming
+    return stored_upcoming
+
+
 def register_song(payload: str, requester_name: str) -> str:
-    """1:1 채팅 노래 신청 처리 — 가수·노래제목 모두 일치 시 중복 거부"""
+    """1:1 채팅 노래 신청 처리 — 가수·노래제목 모두 일치 시 중복 거부 및 다음 추천 후보 목록 반영"""
     parsed = parse_song_payload(payload)
     if not parsed:
         return (
@@ -310,7 +396,7 @@ def register_song(payload: str, requester_name: str) -> str:
     song_key = normalize_song_key(artist, title)
 
     with state_lock:
-        latest = load_json_dict(SONGS_STORE_PATH)
+        latest = load_json_dict(SONGS_STORE_KEY)
         songs_data.clear()
         songs_data.update(latest)
         items = ensure_pool_schema(songs_data, "songs")
@@ -335,17 +421,18 @@ def register_song(payload: str, requester_name: str) -> str:
                 "created_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
             }
         )
-        save_json_dict(SONGS_STORE_PATH, songs_data)
+        sync_upcoming_song_ids(songs_data, items)
+        save_json_dict(SONGS_STORE_KEY, songs_data)
         total_count = len(items)
 
     status_note = (
         "오노추가 시작되었습니다! 본방에서 /오노추로 확인해 보세요."
-        if total_count >= MIN_RECOMMEND_POOL_SIZE
-        else f"오노추 시작까지 {MIN_RECOMMEND_POOL_SIZE - total_count}곡 남았습니다."
+        if total_count >= MIN_SONG_RECOMMEND_POOL_SIZE
+        else f"오노추 시작까지 {MIN_SONG_RECOMMEND_POOL_SIZE - total_count}곡 남았습니다."
     )
     return (
         f"✅ 노래가 등록되었습니다: {artist} - {title}\n"
-        f"(현재 {total_count}/{MIN_RECOMMEND_POOL_SIZE}곡 · {status_note})"
+        f"(현재 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})"
     )
 
 
@@ -362,8 +449,9 @@ def format_song_recommendation_msg(day: str, artist: str, title: str) -> str:
 def get_today_song_recommendation() -> str:
     """
     오늘의 노래 추천(오노추):
-    - 30개 이상부터 시작
+    - 5개 이상부터 시작
     - 오늘 이미 뽑힌 곡이 있으면 오늘 값 반환
+    - 앞으로 추천될 일이 남은 목록(upcoming_ids)에서 랜덤 선정
     - 전체 곡 소진 전까지 중복 미출력
     - 어제 추천된 곡이 내일(오늘) 첫 추천에서 다시 나오지 않도록 제외
     """
@@ -371,17 +459,17 @@ def get_today_song_recommendation() -> str:
     prev_day = yesterday_key()
 
     with state_lock:
-        latest = load_json_dict(SONGS_STORE_PATH)
+        latest = load_json_dict(SONGS_STORE_KEY)
         songs_data.clear()
         songs_data.update(latest)
         items = ensure_pool_schema(songs_data, "songs")
         total_count = len(items)
 
-        if total_count < MIN_RECOMMEND_POOL_SIZE:
+        if total_count < MIN_SONG_RECOMMEND_POOL_SIZE:
             return (
-                f"🎵 오노추는 노래가 {MIN_RECOMMEND_POOL_SIZE}곡 이상 모여야 시작됩니다.\n"
-                f"현재 등록된 노래: {total_count}/{MIN_RECOMMEND_POOL_SIZE}곡 "
-                f"({MIN_RECOMMEND_POOL_SIZE - total_count}곡 더 필요해요!)\n\n"
+                f"🎵 오노추는 노래가 {MIN_SONG_RECOMMEND_POOL_SIZE}곡 이상 모여야 시작됩니다.\n"
+                f"현재 등록된 노래: {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 "
+                f"({MIN_SONG_RECOMMEND_POOL_SIZE - total_count}곡 더 필요해요!)\n\n"
                 f"※ 노래 신청은 봇과의 1:1 채팅에서\n"
                 f"/노래신청 (가수)-(노래제목)으로 해주세요."
             )
@@ -393,6 +481,10 @@ def get_today_song_recommendation() -> str:
         }
 
         if today_pick_id and str(today_pick_id) in item_map:
+            prev_upcoming = list(songs_data.get("upcoming_ids") or [])
+            sync_upcoming_song_ids(songs_data, items, day=day, prev_day=prev_day)
+            if songs_data.get("upcoming_ids") != prev_upcoming:
+                save_json_dict(SONGS_STORE_KEY, songs_data)
             picked = item_map[str(today_pick_id)]
             return format_song_recommendation_msg(
                 day=day,
@@ -400,28 +492,27 @@ def get_today_song_recommendation() -> str:
                 title=str(picked.get("title", "")),
             )
 
+        upcoming_ids = sync_upcoming_song_ids(songs_data, items, day=day, prev_day=prev_day)
+        yesterday_pick_id = str(daily_picks.get(prev_day) or "")
+
+        candidates = [sid for sid in upcoming_ids if sid != yesterday_pick_id]
+        if not candidates:
+            candidates = list(upcoming_ids) or list(item_map.keys())
+
+        chosen_id = random.choice(candidates)
         used_ids: list[str] = [
             str(uid) for uid in songs_data.get("used_ids", []) if str(uid) in item_map
         ]
-        yesterday_pick_id = daily_picks.get(prev_day)
-
-        candidates = [
-            item_id for item_id in item_map.keys()
-            if item_id not in used_ids and item_id != yesterday_pick_id
-        ]
-
-        if not candidates:
-            used_ids = []
-            candidates = [
-                item_id for item_id in item_map.keys()
-                if item_id != yesterday_pick_id
-            ] or list(item_map.keys())
-
-        chosen_id = random.choice(candidates)
-        used_ids.append(chosen_id)
+        if chosen_id not in used_ids:
+            used_ids.append(chosen_id)
         songs_data["used_ids"] = used_ids
         daily_picks[day] = chosen_id
-        save_json_dict(SONGS_STORE_PATH, songs_data)
+
+        remaining_after_pick = [sid for sid in upcoming_ids if sid != chosen_id]
+        songs_data["upcoming_ids"] = remaining_after_pick
+        sync_upcoming_song_ids(songs_data, items, day=day, prev_day=prev_day)
+
+        save_json_dict(SONGS_STORE_KEY, songs_data)
 
         picked = item_map[chosen_id]
         return format_song_recommendation_msg(
@@ -431,8 +522,65 @@ def get_today_song_recommendation() -> str:
         )
 
 
+def format_song_lists_msg() -> str:
+    """전체 등록 노래 목록과 앞으로 추천될 일이 남은 다음 랜덤 추천 후보 목록을 함께 출력"""
+    day = today_key()
+    prev_day = yesterday_key()
+
+    with state_lock:
+        latest = load_json_dict(SONGS_STORE_KEY)
+        songs_data.clear()
+        songs_data.update(latest)
+        items = ensure_pool_schema(songs_data, "songs")
+        prev_upcoming = list(songs_data.get("upcoming_ids") or [])
+        upcoming_ids = sync_upcoming_song_ids(songs_data, items, day=day, prev_day=prev_day)
+        if songs_data.get("upcoming_ids") != prev_upcoming:
+            save_json_dict(SONGS_STORE_KEY, songs_data)
+
+    if not items:
+        return (
+            "🎵 현재 등록된 노래가 없습니다.\n\n"
+            "※ 노래 신청은 봇과의 1:1 채팅에서\n"
+            "/노래신청 (가수)-(노래제목)으로 해주세요."
+        )
+
+    item_map = {
+        str(it.get("id")): it for it in items if isinstance(it, dict) and it.get("id")
+    }
+    used_set = {str(uid) for uid in songs_data.get("used_ids", [])}
+    today_pick_id = str((songs_data.get("daily_picks") or {}).get(day) or "")
+    yesterday_pick_id = str((songs_data.get("daily_picks") or {}).get(prev_day) or "")
+
+    all_lines = [f"🎶 전체 등록 노래 목록 (총 {len(items)}곡 · 기준: {MIN_SONG_RECOMMEND_POOL_SIZE}곡)"]
+    for idx, it in enumerate(items, start=1):
+        if not isinstance(it, dict):
+            continue
+        sid = str(it.get("id") or "")
+        artist = str(it.get("artist") or "")
+        title = str(it.get("title") or "")
+        if sid == today_pick_id:
+            badge = " [오늘 추천]"
+        elif sid in used_set:
+            badge = " [추천 완료]"
+        else:
+            badge = " [추천 대기]"
+        all_lines.append(f"{idx}. {artist} - {title}{badge}")
+
+    next_random_candidates = [sid for sid in upcoming_ids if sid != yesterday_pick_id] or list(upcoming_ids)
+    next_lines = [f"\n🎲 앞으로 추천될 남은 노래 (다음 랜덤 후보 {len(next_random_candidates)}곡)"]
+    if next_random_candidates:
+        for idx, sid in enumerate(next_random_candidates, start=1):
+            it = item_map.get(sid)
+            if isinstance(it, dict):
+                next_lines.append(f"{idx}. {it.get('artist', '')} - {it.get('title', '')}")
+    else:
+        next_lines.append("• 대기 중인 노래가 없습니다.")
+
+    return "\n".join(all_lines + next_lines)
+
+
 def register_adult_link(payload: str, requester_name: str) -> str:
-    """1:1 채팅 야동 링크 신청 처리 — 중복 링크 자동 차단"""
+    """1:1 채팅 야동 링크 신청 처리 — 중복 링크 자동 차단 (개수 제한 없음)"""
     link = extract_link_payload(payload)
     if not link:
         return (
@@ -443,7 +591,7 @@ def register_adult_link(payload: str, requester_name: str) -> str:
     link_key = normalize_link_key(link)
 
     with state_lock:
-        latest = load_json_dict(ADULT_LINKS_STORE_PATH)
+        latest = load_json_dict(ADULT_LINKS_STORE_KEY)
         adult_links_data.clear()
         adult_links_data.update(latest)
         items = ensure_pool_schema(adult_links_data, "links")
@@ -465,17 +613,12 @@ def register_adult_link(payload: str, requester_name: str) -> str:
                 "created_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
             }
         )
-        save_json_dict(ADULT_LINKS_STORE_PATH, adult_links_data)
+        save_json_dict(ADULT_LINKS_STORE_KEY, adult_links_data)
         total_count = len(items)
 
-    status_note = (
-        "오야추가 시작되었습니다! 본방에서 /오야추로 확인해 보세요."
-        if total_count >= MIN_RECOMMEND_POOL_SIZE
-        else f"오야추 시작까지 {MIN_RECOMMEND_POOL_SIZE - total_count}개 남았습니다."
-    )
     return (
         f"✅ 링크가 등록되었습니다.\n"
-        f"(현재 {total_count}/{MIN_RECOMMEND_POOL_SIZE}개 · {status_note})"
+        f"(현재 등록된 링크: {total_count}개 · 바로 /오야추로 확인할 수 있습니다.)"
     )
 
 
@@ -491,7 +634,7 @@ def format_adult_link_recommendation_msg(day: str, url: str) -> str:
 def get_today_adult_link_recommendation() -> str:
     """
     오늘의 야동 추천(오야추):
-    - 30개 이상부터 시작
+    - 개수 제한 없이 1개 이상이면 바로 시작
     - 오늘 이미 뽑힌 링크가 있으면 오늘 값 반환
     - 전체 링크 소진 전까지 중복 미출력
     - 어제 추천된 링크가 내일(오늘) 첫 추천에서 다시 나오지 않도록 제외
@@ -500,17 +643,15 @@ def get_today_adult_link_recommendation() -> str:
     prev_day = yesterday_key()
 
     with state_lock:
-        latest = load_json_dict(ADULT_LINKS_STORE_PATH)
+        latest = load_json_dict(ADULT_LINKS_STORE_KEY)
         adult_links_data.clear()
         adult_links_data.update(latest)
         items = ensure_pool_schema(adult_links_data, "links")
         total_count = len(items)
 
-        if total_count < MIN_RECOMMEND_POOL_SIZE:
+        if total_count < MIN_ADULT_RECOMMEND_POOL_SIZE:
             return (
-                f"🔞 오야추는 링크가 {MIN_RECOMMEND_POOL_SIZE}개 이상 모여야 시작됩니다.\n"
-                f"현재 등록된 링크: {total_count}/{MIN_RECOMMEND_POOL_SIZE}개 "
-                f"({MIN_RECOMMEND_POOL_SIZE - total_count}개 더 필요해요!)\n\n"
+                f"🔞 아직 등록된 추천 링크가 없습니다.\n\n"
                 f"※ 링크 신청은 봇과의 1:1 채팅에서\n"
                 f"/야동신청 (링크)로 해주세요."
             )
@@ -549,7 +690,7 @@ def get_today_adult_link_recommendation() -> str:
         used_ids.append(chosen_id)
         adult_links_data["used_ids"] = used_ids
         daily_picks[day] = chosen_id
-        save_json_dict(ADULT_LINKS_STORE_PATH, adult_links_data)
+        save_json_dict(ADULT_LINKS_STORE_KEY, adult_links_data)
 
         picked = item_map[chosen_id]
         return format_adult_link_recommendation_msg(
@@ -574,17 +715,17 @@ def register_chat_target(event) -> None:
         return
 
     with state_lock:
-        latest = load_json_dict(TARGETS_STORE_PATH)
+        latest = load_json_dict(TARGETS_STORE_KEY)
         targets_data.update(latest)
         if target_id not in targets_data:
             targets_data[target_id] = True
-            save_json_dict(TARGETS_STORE_PATH, targets_data)
+            save_json_dict(TARGETS_STORE_KEY, targets_data)
             logger.info("[TARGET] registered chat target=%s", target_id)
 
 
 def get_chat_targets() -> list[str]:
     with state_lock:
-        latest = load_json_dict(TARGETS_STORE_PATH)
+        latest = load_json_dict(TARGETS_STORE_KEY)
         targets_data.update(latest)
         return [
             tid for tid in targets_data.keys()
@@ -637,16 +778,17 @@ def upsert_member(user_id: str | None, name: str | None = None) -> None:
     if not user_id:
         return
     with state_lock:
-        latest = load_json_dict(MEMBERS_STORE_PATH)
+        latest = load_json_dict(MEMBERS_STORE_KEY)
         members_data.update(latest)
         existing = members_data.get(user_id)
         existing_name = existing.get("name") if isinstance(existing, dict) else None
         resolved_name = name or existing_name or user_id[-6:]
-        members_data[user_id] = {
-            "name": resolved_name,
-            "updated_at": datetime.now(KST).isoformat(),
-        }
-        save_json_dict(MEMBERS_STORE_PATH, members_data)
+        if not isinstance(existing, dict) or existing.get("name") != resolved_name:
+            members_data[user_id] = {
+                "name": resolved_name,
+                "updated_at": datetime.now(KST).isoformat(),
+            }
+            save_json_dict(MEMBERS_STORE_KEY, members_data)
 
 
 def remove_member(user_id: str | None, remove_today_ranking: bool = True) -> None:
@@ -655,18 +797,18 @@ def remove_member(user_id: str | None, remove_today_ranking: bool = True) -> Non
         return
     day = today_key()
     with state_lock:
-        latest_members = load_json_dict(MEMBERS_STORE_PATH)
+        latest_members = load_json_dict(MEMBERS_STORE_KEY)
         members_data.clear()
         members_data.update(latest_members)
         removed_entry = members_data.pop(user_id, None)
         removed_name = removed_entry.get("name") if isinstance(removed_entry, dict) else None
         members_changed = removed_name is not None or user_id in latest_members
         if members_changed:
-            save_json_dict(MEMBERS_STORE_PATH, members_data)
+            save_json_dict(MEMBERS_STORE_KEY, members_data)
 
         ranking_changed = False
         if remove_today_ranking:
-            latest_rank = load_json_dict(RANKING_STORE_PATH)
+            latest_rank = load_json_dict(RANKING_STORE_KEY)
             ranking_data.clear()
             ranking_data.update(latest_rank)
             day_board = ranking_data.get(day)
@@ -675,7 +817,7 @@ def remove_member(user_id: str | None, remove_today_ranking: bool = True) -> Non
                 if not removed_name and isinstance(rank_info, dict):
                     removed_name = rank_info.get("name")
                 ranking_changed = True
-                save_json_dict(RANKING_STORE_PATH, ranking_data)
+                save_json_dict(RANKING_STORE_KEY, ranking_data)
 
         if members_changed or ranking_changed:
             logger.info(
@@ -695,7 +837,7 @@ def sync_group_members_from_api() -> None:
         return
 
     with state_lock:
-        latest = load_json_dict(MEMBERS_STORE_PATH)
+        latest = load_json_dict(MEMBERS_STORE_KEY)
         members_data.update(latest)
         known_ids = set(members_data.keys())
 
@@ -729,7 +871,7 @@ def ensure_known_member(user_id: str | None, name: str) -> None:
     upsert_member(user_id, name)
     day = today_key()
     with state_lock:
-        latest = load_json_dict(RANKING_STORE_PATH)
+        latest = load_json_dict(RANKING_STORE_KEY)
         ranking_data.update(latest)
         day_board = ranking_data.setdefault(day, {})
         if not isinstance(day_board, dict):
@@ -737,18 +879,18 @@ def ensure_known_member(user_id: str | None, name: str) -> None:
             ranking_data[day] = day_board
         if user_id not in day_board or not isinstance(day_board.get(user_id), dict):
             day_board[user_id] = {"name": name or user_id[-6:], "madit": 0}
-            save_json_dict(RANKING_STORE_PATH, ranking_data)
-        elif name:
+            save_json_dict(RANKING_STORE_KEY, ranking_data)
+        elif name and day_board[user_id].get("name") != name:
             day_board[user_id]["name"] = name
-            save_json_dict(RANKING_STORE_PATH, ranking_data)
+            save_json_dict(RANKING_STORE_KEY, ranking_data)
 
 
 def add_speech_count(user_id: str, name: str, amount: int = 1) -> int:
-    """이미 조회된 name을 받아 state_lock 안에서만 상태 갱신 및 파일 저장"""
+    """이미 조회된 name을 받아 state_lock 안에서만 상태 갱신 및 저장"""
     upsert_member(user_id, name)
     day = today_key()
     with state_lock:
-        latest = load_json_dict(RANKING_STORE_PATH)
+        latest = load_json_dict(RANKING_STORE_KEY)
         ranking_data.update(latest)
         day_board = ranking_data.setdefault(day, {})
         if not isinstance(day_board, dict):
@@ -762,7 +904,7 @@ def add_speech_count(user_id: str, name: str, amount: int = 1) -> int:
             entry["name"] = name
         new_total = int(entry.get("madit", 0)) + int(amount)
         entry["madit"] = new_total
-        save_json_dict(RANKING_STORE_PATH, ranking_data)
+        save_json_dict(RANKING_STORE_KEY, ranking_data)
         return new_total
 
 
@@ -772,10 +914,10 @@ def get_sorted_today_entries() -> list[tuple[str, dict]]:
     """
     day = today_key()
     with state_lock:
-        latest_rank = load_json_dict(RANKING_STORE_PATH)
+        latest_rank = load_json_dict(RANKING_STORE_KEY)
         ranking_data.update(latest_rank)
 
-        latest_members = load_json_dict(MEMBERS_STORE_PATH)
+        latest_members = load_json_dict(MEMBERS_STORE_KEY)
         members_data.clear()
         members_data.update(latest_members)
 
@@ -961,7 +1103,7 @@ def save_and_forward_report(
 
         now_kst_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
-        latest = load_json_dict(REPORTS_STORE_PATH)
+        latest = load_json_dict(REPORTS_STORE_KEY)
         reports_data.update(latest)
         items = reports_data.get("items")
         if not isinstance(items, list):
@@ -979,7 +1121,7 @@ def save_and_forward_report(
         items.append(entry)
         if len(items) > 100:
             reports_data["items"] = items[-100:]
-        save_json_dict(REPORTS_STORE_PATH, reports_data)
+        save_json_dict(REPORTS_STORE_KEY, reports_data)
         last_reported_at[cooldown_key] = now_ts
 
     icon = "🚨" if kind == "신고" else "📩"
@@ -1038,7 +1180,7 @@ def save_and_forward_report(
 
 def format_recent_reports(limit: int = 10) -> str:
     with state_lock:
-        latest = load_json_dict(REPORTS_STORE_PATH)
+        latest = load_json_dict(REPORTS_STORE_KEY)
         reports_data.update(latest)
         items = reports_data.get("items", [])
         if not isinstance(items, list) or not items:
@@ -1239,6 +1381,10 @@ def handle_message(event):
 
     if cmd == "/오노추":
         reply_messages(event.reply_token, [get_today_song_recommendation()])
+        return
+
+    if cmd == "/노래목록":
+        reply_messages(event.reply_token, [format_song_lists_msg()])
         return
 
     if cmd == "/오야추":
