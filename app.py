@@ -40,11 +40,10 @@ UPSTASH_REDIS_REST_URL = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
 UPSTASH_REDIS_REST_TOKEN = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
 
 
-def parse_admin_target_ids() -> list[str]:
-    """ADMIN_TARGET_IDS(쉼표 구분 다중 ID) 및 하위호환 ADMIN_TARGET_ID 파싱"""
-    raw_multi = os.getenv("ADMIN_TARGET_IDS") or ""
-    raw_single = os.getenv("ADMIN_TARGET_ID") or ""
-    candidates = [item.strip() for item in f"{raw_multi},{raw_single}".split(",") if item.strip()]
+def parse_id_list(*env_keys: str) -> list[str]:
+    """쉼표로 구분된 다중 LINE ID 환경 변수 파싱 및 중복 제거"""
+    combined = ",".join((os.getenv(k) or "") for k in env_keys)
+    candidates = [item.strip() for item in combined.split(",") if item.strip()]
     seen: set[str] = set()
     ordered: list[str] = []
     for tid in candidates:
@@ -55,8 +54,14 @@ def parse_admin_target_ids() -> list[str]:
 
 
 # 건의·신고를 수신할 관리자 user_id(U...) 또는 운영진 전용방 group_id(C...) 목록
-ADMIN_TARGET_IDS: list[str] = parse_admin_target_ids()
+ADMIN_TARGET_IDS: list[str] = parse_id_list("ADMIN_TARGET_IDS", "ADMIN_TARGET_ID")
 ADMIN_TARGET_SET: set[str] = set(ADMIN_TARGET_IDS)
+
+# 고민상담을 전담 수신할 상담 담당 운영진·상담사 user_id 목록 (미설정 시 ADMIN_TARGET_IDS 사용)
+_raw_counseling_targets = parse_id_list("COUNSELING_TARGET_IDS", "COUNSELING_TARGET_ID")
+COUNSELING_TARGET_IDS: list[str] = _raw_counseling_targets if _raw_counseling_targets else list(ADMIN_TARGET_IDS)
+COUNSELING_TARGET_SET: set[str] = set(COUNSELING_TARGET_IDS)
+
 # 관리자 전용 명령어를 실행할 수 있는 user_id 목록 (쉼표 구분: U111,U222)
 ADMIN_USER_IDS: set[str] = {
     uid.strip()
@@ -80,6 +85,7 @@ RANKING_STORE_KEY = "abyss:rankings"
 TARGETS_STORE_KEY = "abyss:targets"
 MEMBERS_STORE_KEY = "abyss:members"
 REPORTS_STORE_KEY = "abyss:reports"
+COUNSELINGS_STORE_KEY = "abyss:counselings"
 SONGS_STORE_KEY = "abyss:songs"
 ADULT_LINKS_STORE_KEY = "abyss:adult_links"
 
@@ -93,9 +99,10 @@ MIN_ACTIVITY_MADIT = 30
 # 1개 메시지에서 인정되는 유효 단어(3글자 이상)의 최소 길이
 MIN_WORD_LEN = 3
 
-# 건의·신고 도배 방지 쿨타임(초) 및 최소 내용 길이
+# 건의·신고·고민상담 도배 방지 쿨타임(초) 및 최소 내용 길이
 REPORT_COOLDOWN_SEC = 300
 MIN_REPORT_LEN = 5
+MIN_COUNSELING_LEN = 5
 
 # 오노추 시작 최소 등록 개수(5개) / 오야추 시작 최소 등록 개수(1개 이상)
 MIN_SONG_RECOMMEND_POOL_SIZE = 5
@@ -104,6 +111,7 @@ MIN_ADULT_RECOMMEND_POOL_SIZE = 1
 state_lock = threading.Lock()
 last_counted_at: dict[str, float] = {}
 last_reported_at: dict[str, float] = {}
+last_counseled_at: dict[str, float] = {}
 store_cache: dict[str, dict] = {}
 store_loaded_at: dict[str, float] = {}
 
@@ -134,11 +142,12 @@ HWAN_MSG = (
 )
 
 DISCOMFORT_REPORT_GUIDE_MSG = (
-    "🚨 불편신고 안내\n"
+    "🚨 불편신고 및 비밀 고민상담 안내\n"
     "[오른쪽 상단 메뉴 -> 멤버 -> 봇 친구추가]\n\n"
     "친구 추가 후 봇과의 1:1 채팅에서\n"
-    "/신고 [내용] 또는 /건의 [내용]으로 보내주시면\n"
-    "운영진에게 전달됩니다."
+    "• /신고 [내용] 또는 /건의 [내용]\n"
+    "• /고민상담 [내용] (🔒 100% 비밀보장 · 상담 담당자 전용 전달)\n"
+    "으로 보내주시면 본방에 전혀 공개되지 않고 안전하게 전달됩니다."
 )
 
 COMMAND_LIST_MSG = (
@@ -148,25 +157,29 @@ COMMAND_LIST_MSG = (
     "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
     "• /노래목록 — 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
-    "• /불편신고 — 1:1 신고·건의 방법 안내\n"
+    "• /불편신고 — 1:1 신고·건의·비밀 고민상담 안내\n"
     "• /명령어 — 본방 명령어 목록 보기\n\n"
     "[관리자 전용 사용 가능 명령어]\n"
     "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
     "• /전체랭킹 — 오늘 방 전체 마디 수 랭킹 확인\n"
     "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n\n"
-    "💡 노래·링크 신청(/노래신청, /야동신청) 및 신고·건의는\n"
-    "봇과의 1:1 채팅에서 /명령어를 입력해 확인해 주세요."
+    "💡 노래·링크 신청(/노래신청, /야동신청), 신고·건의,\n"
+    "🔒 비밀 고민상담(/고민상담)은 봇과의 1:1 채팅에서 이용해 주세요."
 )
 
 PRIVATE_COMMAND_LIST_MSG = (
     "📌 봇 1:1 개인 채팅 전용 명령어 안내\n\n"
-    "[신청 및 접수 명령어 (1:1 전용)]\n"
+    "[비밀 상담 및 접수 명령어 (1:1 전용)]\n"
+    "• /고민상담 [내용] — 상담 담당 운영진·상담사에게만 비밀 전달\n"
+    "  🔒 모든 상담 내용은 본방에 절대 공개되지 않으며,\n"
+    "     지정된 담당 운영진·상담사 외에는 열람할 수 없습니다.\n"
+    "• /신고 [내용] — 운영진에게 비공개 신고 접수\n"
+    "• /건의 [내용] — 운영진에게 건의사항 전달\n\n"
+    "[신청 명령어 (1:1 전용)]\n"
     "• /노래신청 (가수)-(노래제목) — 통합 노래 리스트에 한 곡/여러 곡 등록\n"
     "  예) /노래신청 아이유-밤편지, 성시경-거리에서\n"
     "• /야동신청 (링크) — 오야추 링크 등록\n"
-    "  예) /야동신청 https://example.com\n"
-    "• /신고 [내용] — 운영진에게 익명/비공개 신고 접수\n"
-    "• /건의 [내용] — 운영진에게 건의사항 전달\n\n"
+    "  예) /야동신청 https://example.com\n\n"
     "[조회 및 안내 명령어]\n"
     "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
     "• /노래목록 — 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
@@ -182,6 +195,13 @@ def is_admin_user(user_id: str | None, chat_id: str = "") -> bool:
     if ADMIN_TARGET_SET:
         return bool((user_id and user_id in ADMIN_TARGET_SET) or (chat_id and chat_id in ADMIN_TARGET_SET))
     return False
+
+
+def is_counseling_staff(user_id: str | None, chat_id: str = "") -> bool:
+    """상담 담당 운영진·상담사 권한 판별"""
+    if COUNSELING_TARGET_SET:
+        return bool((user_id and user_id in COUNSELING_TARGET_SET) or (chat_id and chat_id in COUNSELING_TARGET_SET))
+    return is_admin_user(user_id, chat_id)
 
 
 def today_key() -> str:
@@ -250,6 +270,7 @@ ranking_data = load_json_dict(RANKING_STORE_KEY, force_refresh=True)
 targets_data = load_json_dict(TARGETS_STORE_KEY, force_refresh=True)
 members_data = load_json_dict(MEMBERS_STORE_KEY, force_refresh=True)
 reports_data = load_json_dict(REPORTS_STORE_KEY, force_refresh=True)
+counselings_data = load_json_dict(COUNSELINGS_STORE_KEY, force_refresh=True)
 songs_data = load_json_dict(SONGS_STORE_KEY, force_refresh=True)
 adult_links_data = load_json_dict(ADULT_LINKS_STORE_KEY, force_refresh=True)
 
@@ -797,7 +818,7 @@ def register_chat_target(event) -> None:
     if not target_id:
         return
 
-    if target_id in ADMIN_TARGET_SET:
+    if target_id in ADMIN_TARGET_SET or target_id in COUNSELING_TARGET_SET:
         return
 
     with state_lock:
@@ -815,7 +836,7 @@ def get_chat_targets() -> list[str]:
         targets_data.update(latest)
         return [
             tid for tid in targets_data.keys()
-            if tid not in ADMIN_TARGET_SET
+            if tid not in ADMIN_TARGET_SET and tid not in COUNSELING_TARGET_SET
         ]
 
 
@@ -1264,6 +1285,116 @@ def save_and_forward_report(
     )
 
 
+def save_and_forward_counseling(
+    cooldown_key: str,
+    requester_name: str,
+    content: str,
+) -> tuple[bool, str]:
+    """
+    1:1 개인 채팅으로 접수된 고민상담을 상담 담당 운영진·상담사(COUNSELING_TARGET_IDS)에게만
+    비밀리에 전달하고 별도 저장소에 보관
+    """
+    if not COUNSELING_TARGET_IDS:
+        return (
+            False,
+            "⚠️ 현재 상담 담당 운영진·상담사 수신처가 연결되지 않았습니다. 잠시 후 다시 시도해 주세요.",
+        )
+
+    resolved_name = (
+        requester_name.strip()
+        if requester_name and requester_name.strip()
+        else (cooldown_key[-6:] if cooldown_key else "미확인")
+    )
+
+    now_ts = time.monotonic()
+    with state_lock:
+        prev_ts = last_counseled_at.get(cooldown_key, 0.0)
+        elapsed = now_ts - prev_ts
+        if prev_ts > 0 and elapsed < REPORT_COOLDOWN_SEC:
+            remain_sec = int(REPORT_COOLDOWN_SEC - elapsed) + 1
+            return (
+                False,
+                f"⏳ 연속 접수 방지를 위해 {remain_sec}초 후에 다시 보낼 수 있습니다.",
+            )
+
+        now_kst_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+
+        latest = load_json_dict(COUNSELINGS_STORE_KEY, force_refresh=True)
+        counselings_data.clear()
+        counselings_data.update(latest)
+        items = counselings_data.get("items")
+        if not isinstance(items, list):
+            items = []
+        counselings_data["items"] = items
+
+        counseling_no = len(items) + 1
+        entry = {
+            "no": counseling_no,
+            "requester_name": resolved_name,
+            "content": content,
+            "created_at": now_kst_str,
+        }
+        items.append(entry)
+        if len(items) > 100:
+            counselings_data["items"] = items[-100:]
+        save_json_dict(COUNSELINGS_STORE_KEY, counselings_data)
+        last_counseled_at[cooldown_key] = now_ts
+
+    counselor_text = (
+        f"🔒 [비밀 고민상담 접수 #{counseling_no}]\n"
+        f"• 접수 시각: {now_kst_str}\n"
+        f"• 신청자: {resolved_name}\n"
+        f"• 상담 내용:\n{content}\n\n"
+        f"⚠️ [비밀보장 엄수] 본 상담 내용은 상담 담당 운영진·상담사 전용으로만 전달되었으며 외부·본방 유출을 엄격히 금지합니다."
+    )
+
+    delivered_count = 0
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            for target_id in COUNSELING_TARGET_IDS:
+                try:
+                    line_bot_api.push_message(
+                        PushMessageRequest(
+                            to=target_id,
+                            messages=[TextMessage(text=counselor_text)],
+                        )
+                    )
+                    delivered_count += 1
+                except Exception:
+                    logger.exception(
+                        "[COUNSELING] failed to push counseling no=%d to target=%s",
+                        counseling_no,
+                        target_id,
+                    )
+        logger.info(
+            "[COUNSELING] forwarded no=%d requester=%s delivered=%d/%d",
+            counseling_no,
+            resolved_name,
+            delivered_count,
+            len(COUNSELING_TARGET_IDS),
+        )
+    except Exception:
+        logger.exception("[COUNSELING] failed to initialize API client for counseling no=%d", counseling_no)
+        return (
+            False,
+            "⚠️ 상담 담당자 전송 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        )
+
+    if delivered_count == 0:
+        return (
+            False,
+            "⚠️ 상담 담당자 전송 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        )
+
+    return (
+        True,
+        f"🔒 고민상담이 비밀리에 접수되었습니다. (상담번호 #{counseling_no})\n\n"
+        f"• 모든 상담 내용은 100% 비밀이 보장되며 본방에는 절대 공개되지 않습니다.\n"
+        f"• 지정된 상담 담당 운영진·상담사에게만 직접 전달되었습니다.",
+    )
+
+
 def format_recent_reports(limit: int = 10) -> str:
     with state_lock:
         latest = load_json_dict(REPORTS_STORE_KEY)
@@ -1284,6 +1415,32 @@ def format_recent_reports(limit: int = 10) -> str:
         content = r.get("content", "")
         lines.append(
             f"\n[#{no} · {kind}] 작성자: {reporter_name} ({created_at})\n{content}"
+        )
+
+    return "\n".join(lines)
+
+
+def format_recent_counselings(limit: int = 10) -> str:
+    """상담 담당 운영진·상담사 전용 최근 고민상담 내역 조회"""
+    with state_lock:
+        latest = load_json_dict(COUNSELINGS_STORE_KEY, force_refresh=True)
+        counselings_data.clear()
+        counselings_data.update(latest)
+        items = counselings_data.get("items", [])
+        if not isinstance(items, list) or not items:
+            return "🔒 접수된 비밀 고민상담 내역이 없습니다."
+        recent = list(reversed(items[-limit:]))
+
+    lines = [f"🔒 최근 비밀 고민상담 내역 (최근 {len(recent)}건 · 외부 유출 금지)"]
+    for c in recent:
+        if not isinstance(c, dict):
+            continue
+        no = c.get("no", "?")
+        requester_name = c.get("requester_name") or "미확인"
+        created_at = c.get("created_at", "")
+        content = c.get("content", "")
+        lines.append(
+            f"\n[#{no} · 비밀상담] 신청자: {requester_name} ({created_at})\n{content}"
         )
 
     return "\n".join(lines)
@@ -1402,7 +1559,12 @@ def handle_message(event):
 
     # 1) 초기 세팅용 ID 확인 명령어 (설정 완료 후 본방에서는 완전 숨김)
     if cmd == "/방아이디":
-        if is_private_chat or (not ADMIN_TARGET_SET) or (chat_id in ADMIN_TARGET_SET):
+        if (
+            is_private_chat
+            or (not ADMIN_TARGET_SET and not COUNSELING_TARGET_SET)
+            or (chat_id in ADMIN_TARGET_SET)
+            or (chat_id in COUNSELING_TARGET_SET)
+        ):
             reply_messages(event.reply_token, [f"🆔 현재 채팅 ID:\n{chat_id}"])
         return
 
@@ -1410,6 +1572,12 @@ def handle_message(event):
     if cmd == "/건의목록":
         if ADMIN_TARGET_SET and chat_id in ADMIN_TARGET_SET and is_admin_user(user_id, chat_id):
             reply_messages(event.reply_token, [format_recent_reports()])
+        return
+
+    # 2-1) 상담 담당 운영진·상담사 전용 고민상담 내역 조회 (본방에서는 완전 무응답)
+    if cmd == "/상담목록":
+        if COUNSELING_TARGET_SET and chat_id in COUNSELING_TARGET_SET and is_counseling_staff(user_id, chat_id):
+            reply_messages(event.reply_token, [format_recent_counselings()])
         return
 
     # 3) 1:1 건의·신고 접수 — 오직 1:1 개인 채팅에서만 동작, 본방에서는 완전 무응답
@@ -1434,6 +1602,33 @@ def handle_message(event):
             cooldown_key=user_id,
             reporter_name=reporter_name,
             kind=kind,
+            content=payload,
+        )
+        reply_messages(event.reply_token, [result_msg])
+        return
+
+    # 3-1) 1:1 비밀 고민상담 접수 — 오직 1:1 개인 채팅에서만 동작, 담당 운영진·상담사에게만 전달
+    if cmd == "/고민상담":
+        if not is_private_chat or not user_id:
+            return
+
+        payload = extract_command_payload(user_text, cmd)
+        if len(payload) < MIN_COUNSELING_LEN:
+            reply_messages(
+                event.reply_token,
+                [
+                    f"🔒 [비밀 고민상담 안내]\n"
+                    f"상담 내용은 100% 비밀이 보장되며, 본방에는 절대 공개되지 않고 지정된 상담 담당 운영진·상담사에게만 전달됩니다.\n\n"
+                    f"고민 내용을 {MIN_COUNSELING_LEN}글자 이상 함께 입력해 주세요.\n"
+                    f"예시) /고민상담 요즘 진로와 인간관계 때문에 고민이 많습니다."
+                ],
+            )
+            return
+
+        requester_name = get_display_name(event)
+        _, result_msg = save_and_forward_counseling(
+            cooldown_key=user_id,
+            requester_name=requester_name,
             content=payload,
         )
         reply_messages(event.reply_token, [result_msg])
