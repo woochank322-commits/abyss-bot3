@@ -180,9 +180,9 @@ PRIVATE_COMMAND_LIST_MSG = (
     "• /상담 — 비밀 고민상담·신고·건의 안내 다시 보기"
 )
 
-# /관리명령어 — 모든 명령어를 [일반 멤버 명령어]와 [관리명령어]로 구분해 표시
+# /관리명령어 (1:1 채팅 전용) — 모든 명령어를 [일반 멤버 명령어]와 [관리명령어]로 구분해 표시
 ALL_COMMAND_LIST_MSG = (
-    "🛠️ 전체 명령어 안내 (일반 멤버 / 관리자 구분)\n\n"
+    "🛠️ 전체 명령어 안내 (1:1 전용 · 일반 멤버 / 관리자 구분)\n\n"
     "[일반 멤버 명령어]\n"
     "• /명령어 — 일반 멤버 명령어 보기\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
@@ -195,19 +195,19 @@ ALL_COMMAND_LIST_MSG = (
     "• /노래신청 (가수)-(노래제목) — (1:1 전용) 통합 노래 리스트 등록\n"
     "• /야동신청 (링크) — (1:1 전용) 오야추 링크 등록\n\n"
     "[관리명령어 (현재 권한 제한 없이 사용 가능)]\n"
-    "• /관리명령어 — 전체 명령어(일반/관리 구분) 보기\n"
-    "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
-    "• /전체랭킹 — 오늘 방 전체 마디 수 랭킹 확인\n"
-    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n"
-    "• /노래목록 — 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
+    "• /환찌 (/환츄) — (본방/1:1 공용) 환츄/환찌 안내 보기\n"
+    "• /전체랭킹 — (본방/1:1 공용) 오늘 방 전체 마디 수 랭킹 확인\n"
+    "• /활동부족 — (본방/1:1 공용) 오늘 30마디 미만 인원 목록 확인\n"
+    "• /관리명령어 — (1:1 전용) 전체 명령어(일반/관리 구분) 보기\n"
+    "• /노래목록 — (1:1 전용) 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
     "• /노래삭제 [번호(복수 가능) / 가수-제목] — (1:1 전용) 통합 노래 삭제\n"
     "• /노래큐초기화 — (1:1 전용) 노래 추천 큐 초기화\n"
     "• /링크목록 — (1:1 전용) 전체 추천 링크 목록 확인\n"
     "• /링크삭제 [번호(복수 가능) / URL] — (1:1 전용) 추천 링크 삭제\n"
     "• /링크큐초기화 — (1:1 전용) 링크 추천 큐 초기화\n"
-    "• /방아이디 — 현재 채팅 ID 확인\n"
-    "• /건의목록 — (수신처 전용) 최근 건의·신고 내역 조회\n"
-    "• /상담목록 — (상담 담당 전용) 최근 비밀 고민상담 내역 조회"
+    "• /방아이디 — (1:1 전용) 현재 채팅 ID 확인\n"
+    "• /건의목록 — (1:1 수신처 전용) 최근 건의·신고 내역 조회\n"
+    "• /상담목록 — (1:1 상담 담당 전용) 최근 비밀 고민상담 내역 조회"
 )
 
 
@@ -866,7 +866,7 @@ def get_today_song_recommendation() -> str:
 
 
 def format_song_lists_msg() -> str:
-    """통합 노래 목록과 앞으로 추천될 일이 남은 다음 랜덤 추천 후보 목록을 함께 출력"""
+    """통합 노래 목록과 앞으로 추천될 일이 남은 다음 랜덤 추천 후보 목록을 함께 출력 (1:1 채팅 전용)"""
     day = today_key()
     prev_day = yesterday_key()
 
@@ -1959,7 +1959,7 @@ def handle_message(event):
         return
 
     if cmd == "/관리명령어":
-        if is_admin_user(user_id, chat_id):
+        if is_private_chat and user_id and is_admin_user(user_id, chat_id):
             reply_messages(event.reply_token, [ALL_COMMAND_LIST_MSG])
         return
 
@@ -1967,26 +1967,21 @@ def handle_message(event):
         reply_messages(event.reply_token, [COUNSELING_GUIDE_MSG])
         return
 
-    # 1) 초기 세팅용 ID 확인 명령어 (설정 완료 후 본방에서는 완전 숨김)
+    # 1) 1:1 채팅 전용 초기 세팅용 ID 확인 명령어
     if cmd == "/방아이디":
-        if (
-            is_private_chat
-            or (not ADMIN_TARGET_SET and not COUNSELING_TARGET_SET)
-            or (chat_id in ADMIN_TARGET_SET)
-            or (chat_id in COUNSELING_TARGET_SET)
-        ):
+        if is_private_chat and user_id:
             reply_messages(event.reply_token, [f"🆔 현재 채팅 ID:\n{chat_id}"])
         return
 
-    # 2) 운영진 전용 건의·신고 내역 조회 (본방에서는 완전 무응답)
+    # 2) 1:1 채팅 전용 건의·신고 내역 조회
     if cmd == "/건의목록":
-        if ADMIN_TARGET_SET and chat_id in ADMIN_TARGET_SET and is_admin_user(user_id, chat_id):
+        if is_private_chat and user_id and ADMIN_TARGET_SET and chat_id in ADMIN_TARGET_SET and is_admin_user(user_id, chat_id):
             reply_messages(event.reply_token, [format_recent_reports()])
         return
 
-    # 2-1) 상담 담당 운영진·상담사 전용 고민상담 내역 조회 (본방에서는 완전 무응답)
+    # 2-1) 1:1 채팅 전용 상담 담당 운영진·상담사 고민상담 내역 조회
     if cmd == "/상담목록":
-        if COUNSELING_TARGET_SET and chat_id in COUNSELING_TARGET_SET and is_counseling_staff(user_id, chat_id):
+        if is_private_chat and user_id and COUNSELING_TARGET_SET and chat_id in COUNSELING_TARGET_SET and is_counseling_staff(user_id, chat_id):
             reply_messages(event.reply_token, [format_recent_counselings()])
         return
 
@@ -2061,7 +2056,12 @@ def handle_message(event):
         reply_messages(event.reply_token, [register_adult_link(payload, requester_name=requester_name)])
         return
 
-    # 5) 1:1 채팅 전용 관리 명령어 (/전체랭킹, /활동부족, /노래목록 제외한 나머지 관리 명령어)
+    # 5) 1:1 채팅 전용 관리 명령어 (/전체랭킹, /활동부족, /환찌, /환츄 제외한 나머지 관리 명령어)
+    if cmd == "/노래목록":
+        if is_private_chat and user_id and is_admin_user(user_id, chat_id):
+            reply_messages(event.reply_token, [format_song_lists_msg()])
+        return
+
     if cmd == "/노래삭제":
         if not is_private_chat or not user_id:
             return
@@ -2094,7 +2094,7 @@ def handle_message(event):
         reply_messages(event.reply_token, [reset_adult_link_queue()])
         return
 
-    # 이하 일반 본방 기능 및 관리명령어(/노래목록, /전체랭킹, /활동부족, /환찌, /환츄)
+    # 이하 일반 본방 기능 및 본방/1:1 공용 관리명령어(/전체랭킹, /활동부족, /환찌, /환츄)
     if is_group_or_room and user_id:
         name = get_display_name(event)
         upsert_member(user_id, name)
@@ -2105,11 +2105,6 @@ def handle_message(event):
 
     if cmd == "/오노추":
         reply_messages(event.reply_token, [get_today_song_recommendation()])
-        return
-
-    if cmd == "/노래목록":
-        if is_admin_user(user_id, chat_id):
-            reply_messages(event.reply_token, [format_song_lists_msg()])
         return
 
     if cmd == "/오야추":
