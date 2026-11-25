@@ -145,8 +145,8 @@ COMMAND_LIST_MSG = (
     "📌 본방 사용 가능한 명령어 안내\n\n"
     "[일반 멤버 명령어]\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
-    "• /오노추 — 오늘의 노래 추천 확인\n"
-    "• /노래목록 — 전체 노래 및 다음 랜덤 추천 후보 확인\n"
+    "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
+    "• /노래목록 — 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
     "• /불편신고 — 1:1 신고·건의 방법 안내\n"
     "• /명령어 — 본방 명령어 목록 보기\n\n"
@@ -161,15 +161,15 @@ COMMAND_LIST_MSG = (
 PRIVATE_COMMAND_LIST_MSG = (
     "📌 봇 1:1 개인 채팅 전용 명령어 안내\n\n"
     "[신청 및 접수 명령어 (1:1 전용)]\n"
-    "• /노래신청 (가수)-(노래제목) — 한 곡 또는 여러 곡 등록\n"
+    "• /노래신청 (가수)-(노래제목) — 통합 노래 리스트에 한 곡/여러 곡 등록\n"
     "  예) /노래신청 아이유-밤편지, 성시경-거리에서\n"
     "• /야동신청 (링크) — 오야추 링크 등록\n"
     "  예) /야동신청 https://example.com\n"
     "• /신고 [내용] — 운영진에게 익명/비공개 신고 접수\n"
     "• /건의 [내용] — 운영진에게 건의사항 전달\n\n"
     "[조회 및 안내 명령어]\n"
-    "• /오노추 — 오늘의 노래 추천 확인\n"
-    "• /노래목록 — 전체 노래 및 다음 랜덤 추천 후보 확인\n"
+    "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
+    "• /노래목록 — 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
     "• /명령어 — 1:1 채팅 명령어 목록 다시 보기"
 )
@@ -309,7 +309,6 @@ def parse_songs_payload(payload: str) -> tuple[list[tuple[str, str]], list[str]]
     if not raw:
         return [], []
 
-    # 줄바꿈 및 쉼표/세미콜론으로 먼저 1차 분리
     line_chunks = re.split(r"[\r\n,;]+", raw)
     candidates: list[str] = []
 
@@ -317,7 +316,6 @@ def parse_songs_payload(payload: str) -> tuple[list[tuple[str, str]], list[str]]
         part = line.strip()
         if not part:
             continue
-        # ' / ' 형태로 여러 곡을 이어 적은 경우 분리하되, '가수-제목' 쌍이 2개 이상일 때만 분할
         if " / " in part:
             slash_parts = [p.strip() for p in part.split(" / ") if p.strip()]
             valid_slash_pairs = sum(1 for p in slash_parts if parse_single_song_chunk(p) is not None)
@@ -380,7 +378,7 @@ def ensure_pool_schema(store: dict, items_key: str) -> list[dict]:
 
 def sync_upcoming_song_ids(store: dict, items: list[dict], day: str | None = None, prev_day: str | None = None) -> list[str]:
     """
-    앞으로 추천될 일이 남은 노래 ID 목록('upcoming_ids')을 별도 리스트로 동기화:
+    통합 노래 풀 기준 앞으로 추천될 일이 남은 노래 ID 목록('upcoming_ids') 동기화:
     - 이미 추천 완료된 used_ids 제외
     - 오늘/어제 추천된 곡 제외
     - 전체 곡을 한 바퀴 다 돌았을 때는 어제 추천 곡만 제외하고 남은 후보를 다시 구성
@@ -427,7 +425,7 @@ def sync_upcoming_song_ids(store: dict, items: list[dict], day: str | None = Non
 
 
 def register_song(payload: str, requester_name: str) -> str:
-    """1:1 채팅 노래 신청 처리 — 한 번에 여러 곡 등록 지원 및 중복 거부"""
+    """통합 노래 리스트에 한 곡 또는 여러 곡 등록 처리 (1:1 채팅 전용)"""
     parsed_songs, invalid_chunks = parse_songs_payload(payload)
     if not parsed_songs:
         return (
@@ -442,7 +440,7 @@ def register_song(payload: str, requester_name: str) -> str:
     base_ts_ms = int(time.time() * 1000)
 
     with state_lock:
-        latest = load_json_dict(SONGS_STORE_KEY)
+        latest = load_json_dict(SONGS_STORE_KEY, force_refresh=True)
         songs_data.clear()
         songs_data.update(latest)
         items = ensure_pool_schema(songs_data, "songs")
@@ -485,25 +483,24 @@ def register_song(payload: str, requester_name: str) -> str:
         total_count = len(items)
 
     status_note = (
-        "오노추가 시작되었습니다! 본방에서 /오노추로 확인해 보세요."
+        "오노추가 시작되었습니다! /오노추로 확인해 보세요."
         if total_count >= MIN_SONG_RECOMMEND_POOL_SIZE
         else f"오노추 시작까지 {MIN_SONG_RECOMMEND_POOL_SIZE - total_count}곡 남았습니다."
     )
 
-    # 한 곡만 입력한 경우 기존과 동일한 간결한 메시지 유지
     if len(parsed_songs) == 1 and not invalid_chunks:
         if added_songs:
             artist, title = added_songs[0]
             return (
-                f"✅ 노래가 등록되었습니다: {artist} - {title}\n"
+                f"✅ 통합 리스트에 노래가 등록되었습니다: {artist} - {title}\n"
                 f"(현재 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})"
             )
         artist, title = duplicate_songs[0]
-        return f"🎶 이미 등록된 노래입니다: {artist} - {title}"
+        return f"🎶 이미 통합 리스트에 등록된 노래입니다: {artist} - {title}"
 
     lines: list[str] = []
     if added_songs:
-        lines.append(f"✅ 노래 {len(added_songs)}곡이 등록되었습니다:")
+        lines.append(f"✅ 통합 리스트에 노래 {len(added_songs)}곡이 등록되었습니다:")
         for artist, title in added_songs:
             lines.append(f"• {artist} - {title}")
     else:
@@ -521,13 +518,13 @@ def register_song(payload: str, requester_name: str) -> str:
         if len(invalid_chunks) > 5:
             lines.append(f"• 외 {len(invalid_chunks) - 5}건")
 
-    lines.append(f"\n(현재 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})")
+    lines.append(f"\n(현재 통합 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})")
     return "\n".join(lines)
 
 
 def format_song_recommendation_msg(day: str, artist: str, title: str) -> str:
     return (
-        f"🎧 [{day}] 오늘의 노래 추천 [오노추]\n"
+        f"🎧 [{day}] 오늘의 통합 노래 추천 [오노추]\n"
         f"• 가수: {artist}\n"
         f"• 노래: {title}\n\n"
         f"※ 노래 신청은 봇과의 1:1 채팅에서\n"
@@ -537,9 +534,9 @@ def format_song_recommendation_msg(day: str, artist: str, title: str) -> str:
 
 def get_today_song_recommendation() -> str:
     """
-    오늘의 노래 추천(오노추):
-    - 5개 이상부터 시작
-    - 오늘 이미 뽑힌 곡이 있으면 오늘 값 반환
+    오늘의 통합 노래 추천(오노추):
+    - 통합 노래 풀 5개 이상부터 시작
+    - 당일(today_key) 이미 결정된 곡이 있으면 어떤 멤버가 입력하든 동일한 오늘 추천 곡 반환
     - 앞으로 추천될 일이 남은 목록(upcoming_ids)에서 랜덤 선정
     - 전체 곡 소진 전까지 중복 미출력
     - 어제 추천된 곡이 내일(오늘) 첫 추천에서 다시 나오지 않도록 제외
@@ -548,7 +545,7 @@ def get_today_song_recommendation() -> str:
     prev_day = yesterday_key()
 
     with state_lock:
-        latest = load_json_dict(SONGS_STORE_KEY)
+        latest = load_json_dict(SONGS_STORE_KEY, force_refresh=True)
         songs_data.clear()
         songs_data.update(latest)
         items = ensure_pool_schema(songs_data, "songs")
@@ -556,7 +553,7 @@ def get_today_song_recommendation() -> str:
 
         if total_count < MIN_SONG_RECOMMEND_POOL_SIZE:
             return (
-                f"🎵 오노추는 노래가 {MIN_SONG_RECOMMEND_POOL_SIZE}곡 이상 모여야 시작됩니다.\n"
+                f"🎵 오노추는 통합 노래가 {MIN_SONG_RECOMMEND_POOL_SIZE}곡 이상 모여야 시작됩니다.\n"
                 f"현재 등록된 노래: {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 "
                 f"({MIN_SONG_RECOMMEND_POOL_SIZE - total_count}곡 더 필요해요!)\n\n"
                 f"※ 노래 신청은 봇과의 1:1 채팅에서\n"
@@ -612,12 +609,12 @@ def get_today_song_recommendation() -> str:
 
 
 def format_song_lists_msg() -> str:
-    """전체 등록 노래 목록과 앞으로 추천될 일이 남은 다음 랜덤 추천 후보 목록을 함께 출력"""
+    """통합 노래 목록과 앞으로 추천될 일이 남은 다음 랜덤 추천 후보 목록을 함께 출력"""
     day = today_key()
     prev_day = yesterday_key()
 
     with state_lock:
-        latest = load_json_dict(SONGS_STORE_KEY)
+        latest = load_json_dict(SONGS_STORE_KEY, force_refresh=True)
         songs_data.clear()
         songs_data.update(latest)
         items = ensure_pool_schema(songs_data, "songs")
@@ -628,7 +625,7 @@ def format_song_lists_msg() -> str:
 
     if not items:
         return (
-            "🎵 현재 등록된 노래가 없습니다.\n\n"
+            "🎵 현재 통합 리스트에 등록된 노래가 없습니다.\n\n"
             "※ 노래 신청은 봇과의 1:1 채팅에서\n"
             "/노래신청 (가수)-(노래제목)으로 해주세요."
         )
@@ -640,7 +637,7 @@ def format_song_lists_msg() -> str:
     today_pick_id = str((songs_data.get("daily_picks") or {}).get(day) or "")
     yesterday_pick_id = str((songs_data.get("daily_picks") or {}).get(prev_day) or "")
 
-    all_lines = [f"🎶 전체 등록 노래 목록 (총 {len(items)}곡 · 기준: {MIN_SONG_RECOMMEND_POOL_SIZE}곡)"]
+    all_lines = [f"🎶 전체 통합 노래 목록 (총 {len(items)}곡 · 기준: {MIN_SONG_RECOMMEND_POOL_SIZE}곡)"]
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             continue
