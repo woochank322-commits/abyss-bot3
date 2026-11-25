@@ -161,8 +161,8 @@ COMMAND_LIST_MSG = (
 PRIVATE_COMMAND_LIST_MSG = (
     "📌 봇 1:1 개인 채팅 전용 명령어 안내\n\n"
     "[신청 및 접수 명령어 (1:1 전용)]\n"
-    "• /노래신청 (가수)-(노래제목) — 오노추 노래 등록\n"
-    "  예) /노래신청 아이유-밤편지\n"
+    "• /노래신청 (가수)-(노래제목) — 한 곡 또는 여러 곡 등록\n"
+    "  예) /노래신청 아이유-밤편지, 성시경-거리에서\n"
     "• /야동신청 (링크) — 오야추 링크 등록\n"
     "  예) /야동신청 https://example.com\n"
     "• /신고 [내용] — 운영진에게 익명/비공개 신고 접수\n"
@@ -276,11 +276,14 @@ def normalize_song_key(artist: str, title: str) -> str:
     return f"{norm_artist}:::{norm_title}"
 
 
-def parse_song_payload(payload: str) -> tuple[str, str] | None:
-    """'(가수)-(노래제목)' 파싱 — 제목에 하이픈이 포함된 경우도 첫 '-' 기준으로 분리"""
-    cleaned = payload.strip()
+def parse_single_song_chunk(chunk: str) -> tuple[str, str] | None:
+    """단일 '(가수)-(노래제목)' 항목 파싱 — 제목에 하이픈이 포함된 경우도 첫 '-' 기준으로 분리"""
+    cleaned = chunk.strip()
     if not cleaned:
         return None
+
+    cleaned = re.sub(r"^[\d]+[\.)]\s*", "", cleaned).strip()
+    cleaned = re.sub(r"^[•·\-*]\s*", "", cleaned).strip()
 
     if cleaned.startswith("(") and cleaned.endswith(")") and cleaned.count("(") == 1 and cleaned.count(")") == 1:
         cleaned = cleaned[1:-1].strip()
@@ -294,6 +297,46 @@ def parse_song_payload(payload: str) -> tuple[str, str] | None:
     if not artist or not title:
         return None
     return artist, title
+
+
+def parse_songs_payload(payload: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """
+    여러 곡 신청 페이로드 파싱:
+    - 줄바꿈(\n), 쉼표(,), 세미콜론(;), 공백 포함 슬래시( / ) 등으로 곡 항목 분리
+    - 반환: (유효한 [(가수, 제목), ...], 형식이 맞지 않은 원문 항목 [...])
+    """
+    raw = payload.strip()
+    if not raw:
+        return [], []
+
+    # 줄바꿈 및 쉼표/세미콜론으로 먼저 1차 분리
+    line_chunks = re.split(r"[\r\n,;]+", raw)
+    candidates: list[str] = []
+
+    for line in line_chunks:
+        part = line.strip()
+        if not part:
+            continue
+        # ' / ' 형태로 여러 곡을 이어 적은 경우 분리하되, '가수-제목' 쌍이 2개 이상일 때만 분할
+        if " / " in part:
+            slash_parts = [p.strip() for p in part.split(" / ") if p.strip()]
+            valid_slash_pairs = sum(1 for p in slash_parts if parse_single_song_chunk(p) is not None)
+            if valid_slash_pairs >= 2:
+                candidates.extend(slash_parts)
+                continue
+        candidates.append(part)
+
+    parsed_songs: list[tuple[str, str]] = []
+    invalid_chunks: list[str] = []
+
+    for chunk in candidates:
+        parsed = parse_single_song_chunk(chunk)
+        if parsed:
+            parsed_songs.append(parsed)
+        else:
+            invalid_chunks.append(chunk)
+
+    return parsed_songs, invalid_chunks
 
 
 def normalize_link_key(raw_link: str) -> str:
@@ -384,16 +427,19 @@ def sync_upcoming_song_ids(store: dict, items: list[dict], day: str | None = Non
 
 
 def register_song(payload: str, requester_name: str) -> str:
-    """1:1 채팅 노래 신청 처리 — 가수·노래제목 모두 일치 시 중복 거부 및 다음 추천 후보 목록 반영"""
-    parsed = parse_song_payload(payload)
-    if not parsed:
+    """1:1 채팅 노래 신청 처리 — 한 번에 여러 곡 등록 지원 및 중복 거부"""
+    parsed_songs, invalid_chunks = parse_songs_payload(payload)
+    if not parsed_songs:
         return (
-            "🎵 올바른 형식으로 입력해 주세요.\n"
-            "예시) /노래신청 아이유-밤편지"
+            "🎵 올바른 형식으로 입력해 주세요. (여러 곡은 줄바꿈 또는 쉼표로 구분)\n"
+            "예시) /노래신청 아이유-밤편지, 성시경-거리에서"
         )
 
-    artist, title = parsed
-    song_key = normalize_song_key(artist, title)
+    added_songs: list[tuple[str, str]] = []
+    duplicate_songs: list[tuple[str, str]] = []
+    batch_seen_keys: set[str] = set()
+    now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+    base_ts_ms = int(time.time() * 1000)
 
     with state_lock:
         latest = load_json_dict(SONGS_STORE_KEY)
@@ -401,28 +447,41 @@ def register_song(payload: str, requester_name: str) -> str:
         songs_data.update(latest)
         items = ensure_pool_schema(songs_data, "songs")
 
+        existing_keys: set[str] = set()
         for item in items:
             if not isinstance(item, dict):
                 continue
-            existing_key = item.get("dedup_key") or normalize_song_key(
+            ek = item.get("dedup_key") or normalize_song_key(
                 str(item.get("artist", "")), str(item.get("title", ""))
             )
-            if existing_key == song_key:
-                return f"🎶 이미 등록된 노래입니다: {artist} - {title}"
+            if ek:
+                existing_keys.add(ek)
 
-        new_id = f"song_{int(time.time() * 1000)}_{len(items) + 1}"
-        items.append(
-            {
-                "id": new_id,
-                "artist": artist,
-                "title": title,
-                "dedup_key": song_key,
-                "requested_by": requester_name,
-                "created_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
-        sync_upcoming_song_ids(songs_data, items)
-        save_json_dict(SONGS_STORE_KEY, songs_data)
+        for idx, (artist, title) in enumerate(parsed_songs, start=1):
+            song_key = normalize_song_key(artist, title)
+            if song_key in existing_keys or song_key in batch_seen_keys:
+                duplicate_songs.append((artist, title))
+                continue
+
+            batch_seen_keys.add(song_key)
+            existing_keys.add(song_key)
+            new_id = f"song_{base_ts_ms}_{len(items) + idx}"
+            items.append(
+                {
+                    "id": new_id,
+                    "artist": artist,
+                    "title": title,
+                    "dedup_key": song_key,
+                    "requested_by": requester_name,
+                    "created_at": now_str,
+                }
+            )
+            added_songs.append((artist, title))
+
+        if added_songs:
+            sync_upcoming_song_ids(songs_data, items)
+            save_json_dict(SONGS_STORE_KEY, songs_data)
+
         total_count = len(items)
 
     status_note = (
@@ -430,10 +489,40 @@ def register_song(payload: str, requester_name: str) -> str:
         if total_count >= MIN_SONG_RECOMMEND_POOL_SIZE
         else f"오노추 시작까지 {MIN_SONG_RECOMMEND_POOL_SIZE - total_count}곡 남았습니다."
     )
-    return (
-        f"✅ 노래가 등록되었습니다: {artist} - {title}\n"
-        f"(현재 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})"
-    )
+
+    # 한 곡만 입력한 경우 기존과 동일한 간결한 메시지 유지
+    if len(parsed_songs) == 1 and not invalid_chunks:
+        if added_songs:
+            artist, title = added_songs[0]
+            return (
+                f"✅ 노래가 등록되었습니다: {artist} - {title}\n"
+                f"(현재 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})"
+            )
+        artist, title = duplicate_songs[0]
+        return f"🎶 이미 등록된 노래입니다: {artist} - {title}"
+
+    lines: list[str] = []
+    if added_songs:
+        lines.append(f"✅ 노래 {len(added_songs)}곡이 등록되었습니다:")
+        for artist, title in added_songs:
+            lines.append(f"• {artist} - {title}")
+    else:
+        lines.append("🎵 새로 등록된 노래가 없습니다.")
+
+    if duplicate_songs:
+        lines.append(f"\n🎶 이미 등록된 중복 곡 ({len(duplicate_songs)}곡):")
+        for artist, title in duplicate_songs:
+            lines.append(f"• {artist} - {title}")
+
+    if invalid_chunks:
+        lines.append(f"\n⚠️ 형식 오류로 제외된 항목 ({len(invalid_chunks)}건 · '가수-노래제목' 형식 필요):")
+        for bad in invalid_chunks[:5]:
+            lines.append(f"• {bad}")
+        if len(invalid_chunks) > 5:
+            lines.append(f"• 외 {len(invalid_chunks) - 5}건")
+
+    lines.append(f"\n(현재 {total_count}/{MIN_SONG_RECOMMEND_POOL_SIZE}곡 · {status_note})")
+    return "\n".join(lines)
 
 
 def format_song_recommendation_msg(day: str, artist: str, title: str) -> str:
