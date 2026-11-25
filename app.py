@@ -1,7 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 import threading
@@ -73,6 +74,8 @@ RANKING_STORE_PATH = "/tmp/abyss_rankings.json"
 TARGETS_STORE_PATH = "/tmp/abyss_targets.json"
 MEMBERS_STORE_PATH = "/tmp/abyss_members.json"
 REPORTS_STORE_PATH = "/tmp/abyss_reports.json"
+SONGS_STORE_PATH = "/tmp/abyss_songs.json"
+ADULT_LINKS_STORE_PATH = "/tmp/abyss_adult_links.json"
 
 # 같은 유저의 연타 도배 방지 최소 간격(초). 0으로 두면 모든 유효 메시지 카운트
 MIN_SPEECH_INTERVAL_SEC = 2.0
@@ -84,6 +87,9 @@ MIN_WORD_LEN = 3
 # 건의·신고 도배 방지 쿨타임(초) 및 최소 내용 길이
 REPORT_COOLDOWN_SEC = 300
 MIN_REPORT_LEN = 5
+
+# 오노추 / 오야추 시작 최소 등록 개수
+MIN_RECOMMEND_POOL_SIZE = 30
 
 state_lock = threading.Lock()
 last_counted_at: dict[str, float] = {}
@@ -124,15 +130,34 @@ DISCOMFORT_REPORT_GUIDE_MSG = (
 )
 
 COMMAND_LIST_MSG = (
-    "📌 사용 가능한 명령어 안내\n\n"
+    "📌 본방 사용 가능한 명령어 안내\n\n"
     "[일반 멤버 명령어]\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
+    "• /오노추 — 오늘의 노래 추천 확인\n"
+    "• /오야추 — 오늘의 추천 링크 확인\n"
     "• /불편신고 — 1:1 신고·건의 방법 안내\n"
-    "• /명령어 — 사용 가능한 명령어 목록 보기\n\n"
+    "• /명령어 — 본방 명령어 목록 보기\n\n"
     "[관리자 전용 사용 가능 명령어]\n"
     "• /환찌 (/환츄) — 환츄/환찌 안내 보기\n"
     "• /전체랭킹 — 오늘 방 전체 마디 수 랭킹 확인\n"
-    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인"
+    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n\n"
+    "💡 노래·링크 신청(/노래신청, /야동신청) 및 신고·건의는\n"
+    "봇과의 1:1 채팅에서 /명령어를 입력해 확인해 주세요."
+)
+
+PRIVATE_COMMAND_LIST_MSG = (
+    "📌 봇 1:1 개인 채팅 전용 명령어 안내\n\n"
+    "[신청 및 접수 명령어 (1:1 전용)]\n"
+    "• /노래신청 (가수)-(노래제목) — 오노추 노래 등록\n"
+    "  예) /노래신청 아이유-밤편지\n"
+    "• /야동신청 (링크) — 오야추 링크 등록\n"
+    "  예) /야동신청 https://example.com\n"
+    "• /신고 [내용] — 운영진에게 익명/비공개 신고 접수\n"
+    "• /건의 [내용] — 운영진에게 건의사항 전달\n\n"
+    "[조회 및 안내 명령어]\n"
+    "• /오노추 — 오늘의 노래 추천 확인\n"
+    "• /오야추 — 오늘의 추천 링크 확인\n"
+    "• /명령어 — 1:1 채팅 명령어 목록 다시 보기"
 )
 
 
@@ -147,6 +172,10 @@ def is_admin_user(user_id: str | None, chat_id: str = "") -> bool:
 
 def today_key() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def yesterday_key() -> str:
+    return (datetime.now(KST) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def load_json_dict(path: str) -> dict:
@@ -186,6 +215,8 @@ ranking_data = load_json_dict(RANKING_STORE_PATH)
 targets_data = load_json_dict(TARGETS_STORE_PATH)
 members_data = load_json_dict(MEMBERS_STORE_PATH)
 reports_data = load_json_dict(REPORTS_STORE_PATH)
+songs_data = load_json_dict(SONGS_STORE_PATH)
+adult_links_data = load_json_dict(ADULT_LINKS_STORE_PATH)
 
 
 def normalize_command(text: str) -> str:
@@ -203,24 +234,307 @@ def extract_command_payload(text: str, cmd: str) -> str:
     return stripped[idx + len(cmd):].strip()
 
 
-def calculate_message_madit(text: str) -> int:
-    """
-    '/'로 시작하지 않는 메시지에서 한글·영문·숫자 기준 3글자 이상인
-    유효 단어의 개수를 마디 수로 계산 (없으면 0 반환)
-    """
-    stripped = text.strip()
-    if not stripped or stripped.startswith("/"):
-        return 0
+def normalize_song_key(artist: str, title: str) -> str:
+    """가수와 노래제목 일치 여부를 판별하기 위한 정규화 키"""
+    norm_artist = re.sub(r"\s+", "", artist).lower()
+    norm_title = re.sub(r"\s+", "", title).lower()
+    return f"{norm_artist}:::{norm_title}"
 
-    count = 0
-    for token in stripped.split():
-        if token.startswith("@"):
-            continue
-        cleaned = re.sub(r"[^가-힣A-Za-z0-9]", "", token)
-        if len(cleaned) >= MIN_WORD_LEN:
-            count += 1
 
-    return count
+def parse_song_payload(payload: str) -> tuple[str, str] | None:
+    """'(가수)-(노래제목)' 파싱 — 제목에 하이픈이 포함된 경우도 첫 '-' 기준으로 분리"""
+    cleaned = payload.strip()
+    if not cleaned:
+        return None
+
+    if cleaned.startswith("(") and cleaned.endswith(")") and cleaned.count("(") == 1 and cleaned.count(")") == 1:
+        cleaned = cleaned[1:-1].strip()
+
+    if "-" not in cleaned:
+        return None
+
+    artist_part, title_part = cleaned.split("-", 1)
+    artist = artist_part.strip()
+    title = title_part.strip()
+    if not artist or not title:
+        return None
+    return artist, title
+
+
+def normalize_link_key(raw_link: str) -> str:
+    """링크 중복 비교용 정규화 키"""
+    cleaned = raw_link.strip()
+    if cleaned.startswith("<") and cleaned.endswith(">") and len(cleaned) > 2:
+        cleaned = cleaned[1:-1].strip()
+    cleaned = re.sub(r"\s+", "", cleaned)
+    return cleaned.rstrip("/").lower()
+
+
+def extract_link_payload(payload: str) -> str | None:
+    """'/야동신청 (링크)' 또는 '/야동신청 링크'에서 링크 추출"""
+    cleaned = payload.strip()
+    if not cleaned:
+        return None
+    if cleaned.startswith("(") and cleaned.endswith(")") and cleaned.count("(") == 1 and cleaned.count(")") == 1:
+        cleaned = cleaned[1:-1].strip()
+    if not cleaned or any(ch.isspace() for ch in cleaned):
+        return None
+    return cleaned
+
+
+def ensure_pool_schema(store: dict, items_key: str) -> list[dict]:
+    """추천 풀 저장소 기본 구조 보정"""
+    items = store.get(items_key)
+    if not isinstance(items, list):
+        items = []
+        store[items_key] = items
+    used_ids = store.get("used_ids")
+    if not isinstance(used_ids, list):
+        store["used_ids"] = []
+    daily_picks = store.get("daily_picks")
+    if not isinstance(daily_picks, dict):
+        store["daily_picks"] = {}
+    return items
+
+
+def register_song(payload: str, requester_name: str) -> str:
+    """1:1 채팅 노래 신청 처리 — 가수·노래제목 모두 일치 시 중복 거부"""
+    parsed = parse_song_payload(payload)
+    if not parsed:
+        return (
+            "🎵 올바른 형식으로 입력해 주세요.\n"
+            "예시) /노래신청 아이유-밤편지"
+        )
+
+    artist, title = parsed
+    song_key = normalize_song_key(artist, title)
+
+    with state_lock:
+        latest = load_json_dict(SONGS_STORE_PATH)
+        songs_data.clear()
+        songs_data.update(latest)
+        items = ensure_pool_schema(songs_data, "songs")
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            existing_key = item.get("dedup_key") or normalize_song_key(
+                str(item.get("artist", "")), str(item.get("title", ""))
+            )
+            if existing_key == song_key:
+                return f"🎶 이미 등록된 노래입니다: {artist} - {title}"
+
+        new_id = f"song_{int(time.time() * 1000)}_{len(items) + 1}"
+        items.append(
+            {
+                "id": new_id,
+                "artist": artist,
+                "title": title,
+                "dedup_key": song_key,
+                "requested_by": requester_name,
+                "created_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        save_json_dict(SONGS_STORE_PATH, songs_data)
+        total_count = len(items)
+
+    status_note = (
+        "오노추가 시작되었습니다! 본방에서 /오노추로 확인해 보세요."
+        if total_count >= MIN_RECOMMEND_POOL_SIZE
+        else f"오노추 시작까지 {MIN_RECOMMEND_POOL_SIZE - total_count}곡 남았습니다."
+    )
+    return (
+        f"✅ 노래가 등록되었습니다: {artist} - {title}\n"
+        f"(현재 {total_count}/{MIN_RECOMMEND_POOL_SIZE}곡 · {status_note})"
+    )
+
+
+def get_today_song_recommendation() -> str:
+    """
+    오늘의 노래 추천(오노추):
+    - 30개 이상부터 시작
+    - 오늘 이미 뽑힌 곡이 있으면 오늘 값 반환
+    - 전체 곡 소진 전까지 중복 미출력
+    - 어제 추천된 곡이 내일(오늘) 첫 추천에서 다시 나오지 않도록 제외
+    """
+    day = today_key()
+    prev_day = yesterday_key()
+
+    with state_lock:
+        latest = load_json_dict(SONGS_STORE_PATH)
+        songs_data.clear()
+        songs_data.update(latest)
+        items = ensure_pool_schema(songs_data, "songs")
+        total_count = len(items)
+
+        if total_count < MIN_RECOMMEND_POOL_SIZE:
+            return (
+                f"🎵 오노추는 노래가 {MIN_RECOMMEND_POOL_SIZE}곡 이상 모여야 시작됩니다.\n"
+                f"현재 등록된 노래: {total_count}/{MIN_RECOMMEND_POOL_SIZE}곡 "
+                f"({MIN_RECOMMEND_POOL_SIZE - total_count}곡 더 필요해요!)\n"
+                f"※ 봇 1:1 채팅에서 /노래신청 (가수)-(노래제목)으로 신청해 주세요."
+            )
+
+        daily_picks: dict = songs_data["daily_picks"]
+        today_pick_id = daily_picks.get(day)
+        item_map = {
+            str(it.get("id")): it for it in items if isinstance(it, dict) and it.get("id")
+        }
+
+        if today_pick_id and str(today_pick_id) in item_map:
+            picked = item_map[str(today_pick_id)]
+            return (
+                f"🎧 [{day}] 오늘의 노래 추천 [오노추]\n"
+                f"• 가수: {picked.get('artist', '')}\n"
+                f"• 노래: {picked.get('title', '')}"
+            )
+
+        used_ids: list[str] = [
+            str(uid) for uid in songs_data.get("used_ids", []) if str(uid) in item_map
+        ]
+        yesterday_pick_id = daily_picks.get(prev_day)
+
+        candidates = [
+            item_id for item_id in item_map.keys()
+            if item_id not in used_ids and item_id != yesterday_pick_id
+        ]
+
+        if not candidates:
+            used_ids = []
+            candidates = [
+                item_id for item_id in item_map.keys()
+                if item_id != yesterday_pick_id
+            ] or list(item_map.keys())
+
+        chosen_id = random.choice(candidates)
+        used_ids.append(chosen_id)
+        songs_data["used_ids"] = used_ids
+        daily_picks[day] = chosen_id
+        save_json_dict(SONGS_STORE_PATH, songs_data)
+
+        picked = item_map[chosen_id]
+        return (
+            f"🎧 [{day}] 오늘의 노래 추천 [오노추]\n"
+            f"• 가수: {picked.get('artist', '')}\n"
+            f"• 노래: {picked.get('title', '')}"
+        )
+
+
+def register_adult_link(payload: str, requester_name: str) -> str:
+    """1:1 채팅 야동 링크 신청 처리 — 중복 링크 자동 차단"""
+    link = extract_link_payload(payload)
+    if not link:
+        return (
+            "🔞 올바른 형식으로 입력해 주세요.\n"
+            "예시) /야동신청 https://example.com/video"
+        )
+
+    link_key = normalize_link_key(link)
+
+    with state_lock:
+        latest = load_json_dict(ADULT_LINKS_STORE_PATH)
+        adult_links_data.clear()
+        adult_links_data.update(latest)
+        items = ensure_pool_schema(adult_links_data, "links")
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            existing_key = item.get("dedup_key") or normalize_link_key(str(item.get("url", "")))
+            if existing_key == link_key:
+                return "🔞 이미 등록된 링크입니다."
+
+        new_id = f"link_{int(time.time() * 1000)}_{len(items) + 1}"
+        items.append(
+            {
+                "id": new_id,
+                "url": link,
+                "dedup_key": link_key,
+                "requested_by": requester_name,
+                "created_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        save_json_dict(ADULT_LINKS_STORE_PATH, adult_links_data)
+        total_count = len(items)
+
+    status_note = (
+        "오야추가 시작되었습니다! 본방에서 /오야추로 확인해 보세요."
+        if total_count >= MIN_RECOMMEND_POOL_SIZE
+        else f"오야추 시작까지 {MIN_RECOMMEND_POOL_SIZE - total_count}개 남았습니다."
+    )
+    return (
+        f"✅ 링크가 등록되었습니다.\n"
+        f"(현재 {total_count}/{MIN_RECOMMEND_POOL_SIZE}개 · {status_note})"
+    )
+
+
+def get_today_adult_link_recommendation() -> str:
+    """
+    오늘의 야동 추천(오야추):
+    - 30개 이상부터 시작
+    - 오늘 이미 뽑힌 링크가 있으면 오늘 값 반환
+    - 전체 링크 소진 전까지 중복 미출력
+    - 어제 추천된 링크가 내일(오늘) 첫 추천에서 다시 나오지 않도록 제외
+    """
+    day = today_key()
+    prev_day = yesterday_key()
+
+    with state_lock:
+        latest = load_json_dict(ADULT_LINKS_STORE_PATH)
+        adult_links_data.clear()
+        adult_links_data.update(latest)
+        items = ensure_pool_schema(adult_links_data, "links")
+        total_count = len(items)
+
+        if total_count < MIN_RECOMMEND_POOL_SIZE:
+            return (
+                f"🔞 오야추는 링크가 {MIN_RECOMMEND_POOL_SIZE}개 이상 모여야 시작됩니다.\n"
+                f"현재 등록된 링크: {total_count}/{MIN_RECOMMEND_POOL_SIZE}개 "
+                f"({MIN_RECOMMEND_POOL_SIZE - total_count}개 더 필요해요!)\n"
+                f"※ 봇 1:1 채팅에서 /야동신청 (링크)로 신청해 주세요."
+            )
+
+        daily_picks: dict = adult_links_data["daily_picks"]
+        today_pick_id = daily_picks.get(day)
+        item_map = {
+            str(it.get("id")): it for it in items if isinstance(it, dict) and it.get("id")
+        }
+
+        if today_pick_id and str(today_pick_id) in item_map:
+            picked = item_map[str(today_pick_id)]
+            return (
+                f"🔞 [{day}] 오늘의 추천 [오야추]\n"
+                f"{picked.get('url', '')}"
+            )
+
+        used_ids: list[str] = [
+            str(uid) for uid in adult_links_data.get("used_ids", []) if str(uid) in item_map
+        ]
+        yesterday_pick_id = daily_picks.get(prev_day)
+
+        candidates = [
+            item_id for item_id in item_map.keys()
+            if item_id not in used_ids and item_id != yesterday_pick_id
+        ]
+
+        if not candidates:
+            used_ids = []
+            candidates = [
+                item_id for item_id in item_map.keys()
+                if item_id != yesterday_pick_id
+            ] or list(item_map.keys())
+
+        chosen_id = random.choice(candidates)
+        used_ids.append(chosen_id)
+        adult_links_data["used_ids"] = used_ids
+        daily_picks[day] = chosen_id
+        save_json_dict(ADULT_LINKS_STORE_PATH, adult_links_data)
+
+        picked = item_map[chosen_id]
+        return (
+            f"🔞 [{day}] 오늘의 추천 [오야추]\n"
+            f"{picked.get('url', '')}"
+        )
 
 
 def register_chat_target(event) -> None:
@@ -789,6 +1103,26 @@ def handle_member_left(event):
         remove_member(uid, remove_today_ranking=True)
 
 
+def calculate_message_madit(text: str) -> int:
+    """
+    '/'로 시작하지 않는 메시지에서 한글·영문·숫자 기준 3글자 이상인
+    유효 단어의 개수를 마디 수로 계산 (없으면 0 반환)
+    """
+    stripped = text.strip()
+    if not stripped or stripped.startswith("/"):
+        return 0
+
+    count = 0
+    for token in stripped.split():
+        if token.startswith("@"):
+            continue
+        cleaned = re.sub(r"[^가-힣A-Za-z0-9]", "", token)
+        if len(cleaned) >= MIN_WORD_LEN:
+            count += 1
+
+    return count
+
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     source = getattr(event, "source", None)
@@ -807,7 +1141,10 @@ def handle_message(event):
     cmd = normalize_command(user_text)
 
     if cmd == "/명령어":
-        reply_messages(event.reply_token, [COMMAND_LIST_MSG])
+        if is_private_chat:
+            reply_messages(event.reply_token, [PRIVATE_COMMAND_LIST_MSG])
+        else:
+            reply_messages(event.reply_token, [COMMAND_LIST_MSG])
         return
 
     if cmd == "/불편신고":
@@ -822,7 +1159,7 @@ def handle_message(event):
 
     # 2) 운영진 전용 건의·신고 내역 조회 (본방에서는 완전 무응답)
     if cmd == "/건의목록":
-        if chat_id in ADMIN_TARGET_SET and is_admin_user(user_id, chat_id):
+        if ADMIN_TARGET_SET and chat_id in ADMIN_TARGET_SET and is_admin_user(user_id, chat_id):
             reply_messages(event.reply_token, [format_recent_reports()])
         return
 
@@ -853,6 +1190,23 @@ def handle_message(event):
         reply_messages(event.reply_token, [result_msg])
         return
 
+    # 4) 1:1 오노추·오야추 신청 접수 — 오직 1:1 개인 채팅에서만 동작, 본방에서는 완전 무응답
+    if cmd == "/노래신청":
+        if not is_private_chat or not user_id:
+            return
+        requester_name = get_display_name(event)
+        payload = extract_command_payload(user_text, cmd)
+        reply_messages(event.reply_token, [register_song(payload, requester_name=requester_name)])
+        return
+
+    if cmd == "/야동신청":
+        if not is_private_chat or not user_id:
+            return
+        requester_name = get_display_name(event)
+        payload = extract_command_payload(user_text, cmd)
+        reply_messages(event.reply_token, [register_adult_link(payload, requester_name=requester_name)])
+        return
+
     # 이하 일반 본방 기능 (1:1 채팅 유저는 본방 멤버 목록에 섞지 않음)
     if is_group_or_room and user_id:
         name = get_display_name(event)
@@ -861,6 +1215,14 @@ def handle_message(event):
         name = get_display_name(event)
     else:
         name = "미확인"
+
+    if cmd == "/오노추":
+        reply_messages(event.reply_token, [get_today_song_recommendation()])
+        return
+
+    if cmd == "/오야추":
+        reply_messages(event.reply_token, [get_today_adult_link_recommendation()])
+        return
 
     if cmd in ("/환찌", "/환츄"):
         reply_messages(event.reply_token, [HWAN_MSG])
@@ -873,11 +1235,13 @@ def handle_message(event):
         return
 
     if cmd == "/전체랭킹":
-        reply_messages(event.reply_token, [format_all_ranking()])
+        if is_admin_user(user_id, chat_id):
+            reply_messages(event.reply_token, [format_all_ranking()])
         return
 
     if cmd == "/활동부족":
-        reply_messages(event.reply_token, [format_inactive_members()])
+        if is_admin_user(user_id, chat_id):
+            reply_messages(event.reply_token, [format_inactive_members()])
         return
 
     if is_group_or_room and user_id:
