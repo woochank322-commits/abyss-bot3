@@ -246,8 +246,21 @@ def _parse_redis_json(raw_val) -> dict:
     return {}
 
 
+def load_json_dict_strict(key: str) -> dict:
+    """
+    Upstash Redis에서 반드시 최신 JSON 딕셔너리를 조회.
+    네트워크/Redis 오류 시 빈 딕셔너리로 폴백하지 않고 예외를 발생시켜
+    기존 저장 데이터의 0마디 덮어쓰기를 방지한다.
+    """
+    raw_val = redis_client.get(key)
+    data = _parse_redis_json(raw_val)
+    store_cache[key] = data
+    store_loaded_at[key] = time.monotonic()
+    return data
+
+
 def load_json_dict(key: str, force_refresh: bool = False) -> dict:
-    """Upstash Redis에서 JSON 딕셔너리 조회(단기 캐시 적용)"""
+    """Upstash Redis에서 JSON 딕셔너리 조회(단기 캐시 및 안전한 폴백 적용)"""
     now_ts = time.monotonic()
     cached = store_cache.get(key)
     last_ts = store_loaded_at.get(key, 0.0)
@@ -259,11 +272,7 @@ def load_json_dict(key: str, force_refresh: bool = False) -> dict:
         return cached
 
     try:
-        raw_val = redis_client.get(key)
-        data = _parse_redis_json(raw_val)
-        store_cache[key] = data
-        store_loaded_at[key] = now_ts
-        return data
+        return load_json_dict_strict(key)
     except Exception as e:
         logger.warning("[REDIS] failed to load key=%s: %s", key, e)
         if cached is not None:
@@ -1227,12 +1236,15 @@ def register_chat_target(event) -> None:
         return
 
     with state_lock:
-        latest = load_json_dict(TARGETS_STORE_KEY)
-        targets_data.update(latest)
-        if target_id not in targets_data:
-            targets_data[target_id] = True
-            save_json_dict(TARGETS_STORE_KEY, targets_data)
-            logger.info("[TARGET] registered chat target=%s", target_id)
+        try:
+            latest = load_json_dict_strict(TARGETS_STORE_KEY)
+            targets_data.update(latest)
+            if target_id not in targets_data:
+                targets_data[target_id] = True
+                save_json_dict(TARGETS_STORE_KEY, targets_data)
+                logger.info("[TARGET] registered chat target=%s", target_id)
+        except Exception as e:
+            logger.warning("[TARGET] skipped registering target=%s due to redis error: %s", target_id, e)
 
 
 def get_chat_targets() -> list[str]:
@@ -1290,17 +1302,20 @@ def upsert_member(user_id: str | None, name: str | None = None) -> None:
     if not user_id:
         return
     with state_lock:
-        latest = load_json_dict(MEMBERS_STORE_KEY)
-        members_data.update(latest)
-        existing = members_data.get(user_id)
-        existing_name = existing.get("name") if isinstance(existing, dict) else None
-        resolved_name = name or existing_name or user_id[-6:]
-        if not isinstance(existing, dict) or existing.get("name") != resolved_name:
-            members_data[user_id] = {
-                "name": resolved_name,
-                "updated_at": datetime.now(KST).isoformat(),
-            }
-            save_json_dict(MEMBERS_STORE_KEY, members_data)
+        try:
+            latest = load_json_dict_strict(MEMBERS_STORE_KEY)
+            members_data.update(latest)
+            existing = members_data.get(user_id)
+            existing_name = existing.get("name") if isinstance(existing, dict) else None
+            resolved_name = name or existing_name or user_id[-6:]
+            if not isinstance(existing, dict) or existing.get("name") != resolved_name:
+                members_data[user_id] = {
+                    "name": resolved_name,
+                    "updated_at": datetime.now(KST).isoformat(),
+                }
+                save_json_dict(MEMBERS_STORE_KEY, members_data)
+        except Exception as e:
+            logger.warning("[MEMBER] skipped upsert due to redis error: %s", e)
 
 
 def remove_member(user_id: str | None, remove_today_ranking: bool = True) -> None:
@@ -1309,27 +1324,35 @@ def remove_member(user_id: str | None, remove_today_ranking: bool = True) -> Non
         return
     day = today_key()
     with state_lock:
-        latest_members = load_json_dict(MEMBERS_STORE_KEY)
-        members_data.clear()
-        members_data.update(latest_members)
-        removed_entry = members_data.pop(user_id, None)
-        removed_name = removed_entry.get("name") if isinstance(removed_entry, dict) else None
-        members_changed = removed_name is not None or user_id in latest_members
-        if members_changed:
-            save_json_dict(MEMBERS_STORE_KEY, members_data)
+        try:
+            latest_members = load_json_dict_strict(MEMBERS_STORE_KEY)
+            members_data.clear()
+            members_data.update(latest_members)
+            removed_entry = members_data.pop(user_id, None)
+            removed_name = removed_entry.get("name") if isinstance(removed_entry, dict) else None
+            members_changed = removed_name is not None or user_id in latest_members
+            if members_changed:
+                save_json_dict(MEMBERS_STORE_KEY, members_data)
+        except Exception as e:
+            logger.warning("[MEMBER_LEFT] failed to update members store: %s", e)
+            members_changed = False
+            removed_name = None
 
         ranking_changed = False
         if remove_today_ranking:
-            latest_rank = load_json_dict(RANKING_STORE_KEY)
-            ranking_data.clear()
-            ranking_data.update(latest_rank)
-            day_board = ranking_data.get(day)
-            if isinstance(day_board, dict) and user_id in day_board:
-                rank_info = day_board.pop(user_id, None)
-                if not removed_name and isinstance(rank_info, dict):
-                    removed_name = rank_info.get("name")
-                ranking_changed = True
-                save_json_dict(RANKING_STORE_KEY, ranking_data)
+            try:
+                latest_rank = load_json_dict_strict(RANKING_STORE_KEY)
+                ranking_data.clear()
+                ranking_data.update(latest_rank)
+                day_board = ranking_data.get(day)
+                if isinstance(day_board, dict) and user_id in day_board:
+                    rank_info = day_board.pop(user_id, None)
+                    if not removed_name and isinstance(rank_info, dict):
+                        removed_name = rank_info.get("name")
+                    ranking_changed = True
+                    save_json_dict(RANKING_STORE_KEY, ranking_data)
+            except Exception as e:
+                logger.warning("[MEMBER_LEFT] failed to update ranking store: %s", e)
 
         if members_changed or ranking_changed:
             logger.info(
@@ -1383,27 +1406,36 @@ def ensure_known_member(user_id: str | None, name: str) -> None:
     upsert_member(user_id, name)
     day = today_key()
     with state_lock:
-        latest = load_json_dict(RANKING_STORE_KEY)
-        ranking_data.update(latest)
-        day_board = ranking_data.setdefault(day, {})
-        if not isinstance(day_board, dict):
-            day_board = {}
-            ranking_data[day] = day_board
-        if user_id not in day_board or not isinstance(day_board.get(user_id), dict):
-            day_board[user_id] = {"name": name or user_id[-6:], "madit": 0}
-            save_json_dict(RANKING_STORE_KEY, ranking_data)
-        elif name and day_board[user_id].get("name") != name:
-            day_board[user_id]["name"] = name
-            save_json_dict(RANKING_STORE_KEY, ranking_data)
+        try:
+            latest = load_json_dict_strict(RANKING_STORE_KEY)
+            ranking_data.update(latest)
+            day_board = ranking_data.setdefault(day, {})
+            if not isinstance(day_board, dict):
+                day_board = {}
+                ranking_data[day] = day_board
+            if user_id not in day_board or not isinstance(day_board.get(user_id), dict):
+                day_board[user_id] = {"name": name or user_id[-6:], "madit": 0}
+                save_json_dict(RANKING_STORE_KEY, ranking_data)
+            elif name and day_board[user_id].get("name") != name:
+                day_board[user_id]["name"] = name
+                save_json_dict(RANKING_STORE_KEY, ranking_data)
+        except Exception as e:
+            logger.warning("[RANKING] skipped ensure_known_member due to redis error: %s", e)
 
 
 def add_speech_count(user_id: str, name: str, amount: int = 1) -> int:
-    """이미 조회된 name을 받아 state_lock 안에서만 상태 갱신 및 저장"""
+    """이미 조회된 name을 받아 state_lock 안에서만 안전하게 상태 갱신 및 저장"""
     upsert_member(user_id, name)
     day = today_key()
     with state_lock:
-        latest = load_json_dict(RANKING_STORE_KEY)
-        ranking_data.update(latest)
+        try:
+            latest = load_json_dict_strict(RANKING_STORE_KEY)
+            ranking_data.update(latest)
+            redis_ok = True
+        except Exception as e:
+            logger.warning("[SPEECH] redis load failed, updating in-memory state only: %s", e)
+            redis_ok = False
+
         day_board = ranking_data.setdefault(day, {})
         if not isinstance(day_board, dict):
             day_board = {}
@@ -1416,22 +1448,32 @@ def add_speech_count(user_id: str, name: str, amount: int = 1) -> int:
             entry["name"] = name
         new_total = int(entry.get("madit", 0)) + int(amount)
         entry["madit"] = new_total
-        save_json_dict(RANKING_STORE_KEY, ranking_data)
+        if redis_ok:
+            save_json_dict(RANKING_STORE_KEY, ranking_data)
         return new_total
 
 
 def get_sorted_today_entries() -> list[tuple[str, dict]]:
     """
-    현재 방에 남아 있는 멤버(오늘 0마디 포함) 기준으로 오늘 발언 수 내림차순 정렬
+    현재 방에 남아 있는 멤버(오늘 0마디 포함) 기준으로 오늘 발언 수 내림차순 정렬.
+    Redis 일시 장애 시에도 메모리에 있는 오늘 기록이 0으로 초기화되지 않도록 보호한다.
     """
     day = today_key()
     with state_lock:
-        latest_rank = load_json_dict(RANKING_STORE_KEY)
-        ranking_data.update(latest_rank)
+        try:
+            latest_rank = load_json_dict_strict(RANKING_STORE_KEY)
+            if latest_rank:
+                ranking_data.update(latest_rank)
+        except Exception as e:
+            logger.warning("[RANKING] using cached ranking_data due to redis error: %s", e)
 
-        latest_members = load_json_dict(MEMBERS_STORE_KEY)
-        members_data.clear()
-        members_data.update(latest_members)
+        try:
+            latest_members = load_json_dict_strict(MEMBERS_STORE_KEY)
+            if latest_members:
+                members_data.clear()
+                members_data.update(latest_members)
+        except Exception as e:
+            logger.warning("[RANKING] using cached members_data due to redis error: %s", e)
 
         merged_today: dict[str, dict] = {}
 
@@ -1446,9 +1488,12 @@ def get_sorted_today_entries() -> list[tuple[str, dict]]:
         day_board = ranking_data.get(day, {})
         if isinstance(day_board, dict):
             for uid, info in day_board.items():
-                if not uid or not isinstance(info, dict) or uid not in merged_today:
+                if not uid or not isinstance(info, dict):
                     continue
-                prev_name = merged_today[uid].get("name") or uid[-6:]
+                # members_data에 등록되어 있거나, 오늘 실제 발언 기록이 있는 멤버 포함
+                if uid not in merged_today and int(info.get("madit", 0)) <= 0:
+                    continue
+                prev_name = (merged_today.get(uid) or {}).get("name") or uid[-6:]
                 resolved_name = info.get("name") or prev_name
                 merged_today[uid] = {
                     "name": resolved_name,
