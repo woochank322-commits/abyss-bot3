@@ -53,7 +53,7 @@ def parse_id_list(*env_keys: str) -> list[str]:
     return ordered
 
 
-# 건의·신고를 수신할 관리자 user_id(U...) 또는 운영진 전용방 group_id(C...) 목록
+# 건의·신고·관리자호출 알림을 수신할 관리자 user_id(U...) 또는 운영진 전용방 group_id(C...) 목록
 ADMIN_TARGET_IDS: list[str] = parse_id_list("ADMIN_TARGET_IDS", "ADMIN_TARGET_ID")
 ADMIN_TARGET_SET: set[str] = set(ADMIN_TARGET_IDS)
 
@@ -104,6 +104,9 @@ REPORT_COOLDOWN_SEC = 300
 MIN_REPORT_LEN = 5
 MIN_COUNSELING_LEN = 5
 
+# /관리자호출 도배 방지 쿨타임(초)
+ADMIN_CALL_COOLDOWN_SEC = 60
+
 # 오노추 시작 최소 등록 개수(5개) / 오야추 시작 최소 등록 개수(1개 이상)
 MIN_SONG_RECOMMEND_POOL_SIZE = 5
 MIN_ADULT_RECOMMEND_POOL_SIZE = 1
@@ -112,6 +115,7 @@ state_lock = threading.Lock()
 last_counted_at: dict[str, float] = {}
 last_reported_at: dict[str, float] = {}
 last_counseled_at: dict[str, float] = {}
+last_admin_called_at: dict[str, float] = {}
 store_cache: dict[str, dict] = {}
 store_loaded_at: dict[str, float] = {}
 
@@ -154,6 +158,7 @@ COUNSELING_GUIDE_MSG = (
 PRIVATE_COMMAND_LIST_MSG = (
     "📌 봇 1:1 채팅 일반 멤버 명령어 안내 (임시 1:1 전용 운영 중)\n\n"
     "• /명령어 — 1:1 일반 멤버 명령어 보기\n"
+    "• /관리자호출 [사유(선택)] — 지정된 관리자에게 호출 알림 전송\n"
     "• /고민상담 [내용] — 상담 담당 운영진·상담사에게만 비밀 전달\n"
     "  🔒 모든 상담 내용은 본방에 절대 공개되지 않으며,\n"
     "     지정된 담당 운영진·상담사 외에는 열람할 수 없습니다.\n"
@@ -178,6 +183,7 @@ ALL_COMMAND_LIST_MSG = (
     "• /상담 — (본방/1:1 공용) 1:1 비밀 고민상담·신고·건의 안내\n\n"
     "[일반 멤버 명령어 (임시 1:1 전용)]\n"
     "• /명령어 — 일반 멤버 명령어 보기\n"
+    "• /관리자호출 [사유(선택)] — 지정된 관리자에게 호출 알림 전송\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
     "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
@@ -1615,6 +1621,92 @@ def format_inactive_members() -> str:
     return "\n".join(lines)
 
 
+def send_admin_call(
+    caller_id: str,
+    caller_name: str,
+    chat_label: str,
+    reason: str = "",
+) -> tuple[bool, str]:
+    """
+    /관리자호출 실행 시 ADMIN_TARGET_IDS에 등록된 관리자들에게 호출 알림 푸시 전송
+    """
+    if not ADMIN_TARGET_IDS:
+        return (
+            False,
+            "⚠️ 현재 호출 알림을 받을 관리자 수신처가 설정되지 않았습니다.",
+        )
+
+    resolved_caller_name = (
+        caller_name.strip()
+        if caller_name and caller_name.strip()
+        else (caller_id[-6:] if caller_id else "미확인")
+    )
+
+    now_ts = time.monotonic()
+    with state_lock:
+        prev_ts = last_admin_called_at.get(caller_id, 0.0)
+        elapsed = now_ts - prev_ts
+        if prev_ts > 0 and elapsed < ADMIN_CALL_COOLDOWN_SEC:
+            remain_sec = int(ADMIN_CALL_COOLDOWN_SEC - elapsed) + 1
+            return (
+                False,
+                f"⏳ 연속 호출 방지를 위해 {remain_sec}초 후에 다시 호출할 수 있습니다.",
+            )
+        last_admin_called_at[caller_id] = now_ts
+
+    now_kst_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+    reason_block = f"\n• 호출 사유: {reason}" if reason else ""
+    alert_text = (
+        f"🚨 [관리자 호출 알림]\n"
+        f"• 호출 시각: {now_kst_str}\n"
+        f"• 호출자: {resolved_caller_name}\n"
+        f"• 위치: {chat_label}{reason_block}"
+    )
+
+    delivered_count = 0
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            for target_id in ADMIN_TARGET_IDS:
+                try:
+                    line_bot_api.push_message(
+                        PushMessageRequest(
+                            to=target_id,
+                            messages=[TextMessage(text=alert_text)],
+                        )
+                    )
+                    delivered_count += 1
+                except Exception:
+                    logger.exception(
+                        "[ADMIN_CALL] failed to push alert to target=%s",
+                        target_id,
+                    )
+        logger.info(
+            "[ADMIN_CALL] caller=%s (%s) delivered=%d/%d",
+            resolved_caller_name,
+            caller_id,
+            delivered_count,
+            len(ADMIN_TARGET_IDS),
+        )
+    except Exception:
+        logger.exception("[ADMIN_CALL] failed to initialize API client")
+        return (
+            False,
+            "⚠️ 관리자 호출 알림 전송 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        )
+
+    if delivered_count == 0:
+        return (
+            False,
+            "⚠️ 관리자 호출 알림 전송 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+        )
+
+    return (
+        True,
+        "📣 관리자에게 호출 알림을 전송했습니다.",
+    )
+
+
 def save_and_forward_report(
     cooldown_key: str,
     reporter_name: str,
@@ -1997,6 +2089,21 @@ def handle_message(event):
 
     if cmd == "/상담":
         reply_messages(event.reply_token, [COUNSELING_GUIDE_MSG])
+        return
+
+    if cmd == "/관리자호출":
+        if not is_private_chat or not user_id:
+            return
+        caller_name = get_display_name(event)
+        reason = extract_command_payload(user_text, cmd)
+        chat_label = "1:1 개인 채팅"
+        _, call_msg = send_admin_call(
+            caller_id=user_id,
+            caller_name=caller_name,
+            chat_label=chat_label,
+            reason=reason,
+        )
+        reply_messages(event.reply_token, [call_msg])
         return
 
     # 1:1 채팅 전용 명령어 영역
