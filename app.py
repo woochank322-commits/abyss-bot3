@@ -150,20 +150,9 @@ COUNSELING_GUIDE_MSG = (
     "으로 보내주시면 본방에 전혀 공개되지 않고 안전하게 전달됩니다."
 )
 
-# /명령어 — 일반 멤버 명령어만 표시
-COMMAND_LIST_MSG = (
-    "📌 본방 일반 멤버 명령어 안내\n\n"
-    "• /명령어 — 본방 일반 멤버 명령어 보기\n"
-    "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
-    "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
-    "• /오야추 — 오늘의 추천 링크 확인\n"
-    "• /상담 — 1:1 비밀 고민상담·신고·건의 방법 안내\n\n"
-    "💡 노래·링크 신청(/노래신청, /야동신청), 신고·건의,\n"
-    "🔒 비밀 고민상담(/고민상담)은 봇과의 1:1 채팅에서 이용해 주세요."
-)
-
+# /명령어 (임시 1:1 전용)
 PRIVATE_COMMAND_LIST_MSG = (
-    "📌 봇 1:1 채팅 일반 멤버 명령어 안내\n\n"
+    "📌 봇 1:1 채팅 일반 멤버 명령어 안내 (임시 1:1 전용 운영 중)\n\n"
     "• /명령어 — 1:1 일반 멤버 명령어 보기\n"
     "• /고민상담 [내용] — 상담 담당 운영진·상담사에게만 비밀 전달\n"
     "  🔒 모든 상담 내용은 본방에 절대 공개되지 않으며,\n"
@@ -177,37 +166,39 @@ PRIVATE_COMMAND_LIST_MSG = (
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
     "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
-    "• /상담 — 비밀 고민상담·신고·건의 안내 다시 보기"
+    "• /상담 — 비밀 고민상담·신고·건의 안내 다시 보기\n\n"
+    "※ 현재 임시 운영 중으로 본방에서는 /환찌(/환츄), /상담만 동작합니다."
 )
 
-# /관리명령어 (1:1 채팅 전용) — 모든 명령어를 [일반 멤버 명령어]와 [관리명령어]로 구분해 표시
+# /관리명령어 (1:1 채팅 전용)
 ALL_COMMAND_LIST_MSG = (
-    "🛠️ 전체 명령어 안내 (1:1 전용 · 일반 멤버 / 관리자 구분)\n\n"
-    "[일반 멤버 명령어]\n"
+    "🛠️ 전체 명령어 안내 (임시 1:1 전용 운영 중)\n\n"
+    "[본방/1:1 공용 허용 명령어]\n"
+    "• /환찌 (/환츄) — (본방/1:1 공용) 환츄/환찌 안내 보기\n"
+    "• /상담 — (본방/1:1 공용) 1:1 비밀 고민상담·신고·건의 안내\n\n"
+    "[일반 멤버 명령어 (임시 1:1 전용)]\n"
     "• /명령어 — 일반 멤버 명령어 보기\n"
     "• /내랭킹 — 오늘 내 마디 수, 순위, 활동 상태 확인\n"
     "• /오노추 — 오늘의 통합 노래 추천 확인(전원 동일)\n"
     "• /오야추 — 오늘의 추천 링크 확인\n"
-    "• /상담 — 1:1 비밀 고민상담·신고·건의 방법 안내\n"
-    "• /고민상담 [내용] — (1:1 전용) 상담 담당자에게 비밀 고민상담 전달\n"
-    "• /신고 [내용] — (1:1 전용) 운영진에게 비공개 신고 접수\n"
-    "• /건의 [내용] — (1:1 전용) 운영진에게 건의사항 전달\n"
-    "• /노래신청 (가수)-(노래제목) — (1:1 전용) 통합 노래 리스트 등록\n"
-    "• /야동신청 (링크) — (1:1 전용) 오야추 링크 등록\n\n"
-    "[관리명령어 (현재 권한 제한 없이 사용 가능)]\n"
-    "• /환찌 (/환츄) — (본방/1:1 공용) 환츄/환찌 안내 보기\n"
-    "• /전체랭킹 — (본방/1:1 공용) 오늘 방 전체 마디 수 랭킹 확인\n"
-    "• /활동부족 — (본방/1:1 공용) 오늘 30마디 미만 인원 목록 확인\n"
-    "• /관리명령어 — (1:1 전용) 전체 명령어(일반/관리 구분) 보기\n"
-    "• /노래목록 — (1:1 전용) 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
-    "• /노래삭제 [번호(복수 가능) / 가수-제목] — (1:1 전용) 통합 노래 삭제\n"
-    "• /노래큐초기화 — (1:1 전용) 노래 추천 큐 초기화\n"
-    "• /링크목록 — (1:1 전용) 전체 추천 링크 목록 확인\n"
-    "• /링크삭제 [번호(복수 가능) / URL] — (1:1 전용) 추천 링크 삭제\n"
-    "• /링크큐초기화 — (1:1 전용) 링크 추천 큐 초기화\n"
-    "• /방아이디 — (1:1 전용) 현재 채팅 ID 확인\n"
-    "• /건의목록 — (1:1 수신처 전용) 최근 건의·신고 내역 조회\n"
-    "• /상담목록 — (1:1 상담 담당 전용) 최근 비밀 고민상담 내역 조회"
+    "• /고민상담 [내용] — 상담 담당자에게 비밀 고민상담 전달\n"
+    "• /신고 [내용] — 운영진에게 비공개 신고 접수\n"
+    "• /건의 [내용] — 운영진에게 건의사항 전달\n"
+    "• /노래신청 (가수)-(노래제목) — 통합 노래 리스트 등록\n"
+    "• /야동신청 (링크) — 오야추 링크 등록\n\n"
+    "[관리명령어 (임시 1:1 전용)]\n"
+    "• /전체랭킹 — 오늘 방 전체 마디 수 랭킹 확인\n"
+    "• /활동부족 — 오늘 30마디 미만 인원 목록 확인\n"
+    "• /관리명령어 — 전체 명령어(일반/관리 구분) 보기\n"
+    "• /노래목록 — 전체 통합 노래 및 다음 랜덤 추천 후보 확인\n"
+    "• /노래삭제 [번호(복수 가능) / 가수-제목] — 통합 노래 삭제\n"
+    "• /노래큐초기화 — 노래 추천 큐 초기화\n"
+    "• /링크목록 — 전체 추천 링크 목록 확인\n"
+    "• /링크삭제 [번호(복수 가능) / URL] — 추천 링크 삭제\n"
+    "• /링크큐초기화 — 링크 추천 큐 초기화\n"
+    "• /방아이디 — 현재 채팅 ID 확인\n"
+    "• /건의목록 — (수신처 전용) 최근 건의·신고 내역 조회\n"
+    "• /상담목록 — (상담 담당 전용) 최근 비밀 고민상담 내역 조회"
 )
 
 
@@ -1490,7 +1481,6 @@ def get_sorted_today_entries() -> list[tuple[str, dict]]:
             for uid, info in day_board.items():
                 if not uid or not isinstance(info, dict):
                     continue
-                # members_data에 등록되어 있거나, 오늘 실제 발언 기록이 있는 멤버 포함
                 if uid not in merged_today and int(info.get("madit", 0)) <= 0:
                     continue
                 prev_name = (merged_today.get(uid) or {}).get("name") or uid[-6:]
@@ -1996,11 +1986,23 @@ def handle_message(event):
     user_text = (getattr(event.message, "text", None) or "").strip()
     cmd = normalize_command(user_text)
 
+    # ------------------------------------------------------------------
+    # [임시 운영 모드]
+    # 본방 허용 명령어는 /환찌, /환츄, /상담 3가지만 유지하고
+    # 나머지 모든 명령어는 1:1 개인 채팅(is_private_chat)에서만 동작
+    # ------------------------------------------------------------------
+    if cmd in ("/환찌", "/환츄"):
+        reply_messages(event.reply_token, [HWAN_MSG])
+        return
+
+    if cmd == "/상담":
+        reply_messages(event.reply_token, [COUNSELING_GUIDE_MSG])
+        return
+
+    # 1:1 채팅 전용 명령어 영역
     if cmd == "/명령어":
         if is_private_chat:
             reply_messages(event.reply_token, [PRIVATE_COMMAND_LIST_MSG])
-        else:
-            reply_messages(event.reply_token, [COMMAND_LIST_MSG])
         return
 
     if cmd == "/관리명령어":
@@ -2008,29 +2010,21 @@ def handle_message(event):
             reply_messages(event.reply_token, [ALL_COMMAND_LIST_MSG])
         return
 
-    if cmd == "/상담":
-        reply_messages(event.reply_token, [COUNSELING_GUIDE_MSG])
-        return
-
-    # 1) 1:1 채팅 전용 초기 세팅용 ID 확인 명령어
     if cmd == "/방아이디":
         if is_private_chat and user_id:
             reply_messages(event.reply_token, [f"🆔 현재 채팅 ID:\n{chat_id}"])
         return
 
-    # 2) 1:1 채팅 전용 건의·신고 내역 조회
     if cmd == "/건의목록":
         if is_private_chat and user_id and ADMIN_TARGET_SET and chat_id in ADMIN_TARGET_SET and is_admin_user(user_id, chat_id):
             reply_messages(event.reply_token, [format_recent_reports()])
         return
 
-    # 2-1) 1:1 채팅 전용 상담 담당 운영진·상담사 고민상담 내역 조회
     if cmd == "/상담목록":
         if is_private_chat and user_id and COUNSELING_TARGET_SET and chat_id in COUNSELING_TARGET_SET and is_counseling_staff(user_id, chat_id):
             reply_messages(event.reply_token, [format_recent_counselings()])
         return
 
-    # 3) 1:1 건의·신고 접수 — 오직 1:1 개인 채팅에서만 동작, 본방에서는 완전 무응답
     if cmd in ("/건의", "/신고"):
         if not is_private_chat or not user_id:
             return
@@ -2057,7 +2051,6 @@ def handle_message(event):
         reply_messages(event.reply_token, [result_msg])
         return
 
-    # 3-1) 1:1 비밀 고민상담 접수 — 오직 1:1 개인 채팅에서만 동작, 담당 운영진·상담사에게만 전달
     if cmd == "/고민상담":
         if not is_private_chat or not user_id:
             return
@@ -2084,7 +2077,6 @@ def handle_message(event):
         reply_messages(event.reply_token, [result_msg])
         return
 
-    # 4) 1:1 오노추·오야추 신청 접수 — 오직 1:1 개인 채팅에서만 동작, 본방에서는 완전 무응답
     if cmd == "/노래신청":
         if not is_private_chat or not user_id:
             return
@@ -2101,7 +2093,6 @@ def handle_message(event):
         reply_messages(event.reply_token, [register_adult_link(payload, requester_name=requester_name)])
         return
 
-    # 5) 1:1 채팅 전용 관리 명령어 (/전체랭킹, /활동부족, /환찌, /환츄 제외한 나머지 관리 명령어)
     if cmd == "/노래목록":
         if is_private_chat and user_id and is_admin_user(user_id, chat_id):
             reply_messages(event.reply_token, [format_song_lists_msg()])
@@ -2139,42 +2130,36 @@ def handle_message(event):
         reply_messages(event.reply_token, [reset_adult_link_queue()])
         return
 
-    # 이하 일반 본방 기능 및 본방/1:1 공용 관리명령어(/전체랭킹, /활동부족, /환찌, /환츄)
-    if is_group_or_room and user_id:
-        name = get_display_name(event)
-        upsert_member(user_id, name)
-    elif user_id:
-        name = get_display_name(event)
-    else:
-        name = "미확인"
-
     if cmd == "/오노추":
-        reply_messages(event.reply_token, [get_today_song_recommendation()])
+        if is_private_chat:
+            reply_messages(event.reply_token, [get_today_song_recommendation()])
         return
 
     if cmd == "/오야추":
-        reply_messages(event.reply_token, [get_today_adult_link_recommendation()])
-        return
-
-    if cmd in ("/환찌", "/환츄"):
-        reply_messages(event.reply_token, [HWAN_MSG])
+        if is_private_chat:
+            reply_messages(event.reply_token, [get_today_adult_link_recommendation()])
         return
 
     if cmd == "/내랭킹":
-        if is_group_or_room:
-            ensure_known_member(user_id, name)
-        reply_messages(event.reply_token, [format_my_ranking(user_id, name)])
+        if is_private_chat and user_id:
+            name = get_display_name(event)
+            reply_messages(event.reply_token, [format_my_ranking(user_id, name)])
         return
 
     if cmd == "/전체랭킹":
-        reply_messages(event.reply_token, [format_all_ranking()])
+        if is_private_chat:
+            reply_messages(event.reply_token, [format_all_ranking()])
         return
 
     if cmd == "/활동부족":
-        reply_messages(event.reply_token, [format_inactive_members()])
+        if is_private_chat:
+            reply_messages(event.reply_token, [format_inactive_members()])
         return
 
+    # 본방 일반 채팅 마디 수 집계는 정상 유지
     if is_group_or_room and user_id:
+        name = get_display_name(event)
+        upsert_member(user_id, name)
         gained_madit = calculate_message_madit(user_text)
         if gained_madit > 0:
             now_ts = time.monotonic()
